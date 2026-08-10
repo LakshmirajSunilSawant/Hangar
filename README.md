@@ -48,6 +48,9 @@ The PRD specifies **gVisor/Kata** for isolating untrusted code — that is the r
 - [uv](https://docs.astral.sh/uv/)
 - Docker (daemon running)
 
+To run this on a server, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — the
+$0-forever setup on an Oracle Always Free VM, including the gVisor sandbox.
+
 ## Setup
 
 ```bash
