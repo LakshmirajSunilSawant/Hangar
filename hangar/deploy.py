@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import backends, store
+from . import backends, routing, store
 from .backends import BackendError
 from .detect import DetectionError, detect
+from .routing import RoutingError
 from .store import AppStatus, Deployment, DeploymentStatus
 
 log = logging.getLogger("hangar.deploy")
@@ -66,7 +67,13 @@ def deploy(app_id: str) -> None:
                 app_name=app.name,
                 container_port=detection.port,
             )
-            record(f"running at {running.url}")
+
+            # Publishing the route is what makes the app shareable; without a
+            # router this returns the direct host:port URL unchanged.
+            url = routing.get_router().upsert(
+                app_id=app.id, app_name=app.name, host_port=running.host_port
+            )
+            record(f"running at {url}")
 
             deployment.status = DeploymentStatus.SUCCEEDED
             deployment.image_ref = result.image_tag
@@ -74,16 +81,31 @@ def deploy(app_id: str) -> None:
             deployment.finished_at = store.utcnow()
 
             app.status = AppStatus.RUNNING
-            app.url = running.url
+            app.url = url
             app.host_port = running.host_port
             store.save(sess, app, deployment)
             log.info("app %s (%s) deployed to %s", app.name, app.id, running.url)
 
+        except RoutingError as exc:
+            # The container started but isn't reachable. Leaving it running
+            # behind a failed app record wastes memory and confuses the next
+            # deploy, so undo it.
+            _discard_container(app.id, lines)
+            _fail(sess, app, deployment, lines, str(exc))
         except (DetectionError, BackendError) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread
             log.exception("unexpected failure deploying %s", app_id)
             _fail(sess, app, deployment, lines, f"unexpected error: {exc}")
+
+
+def _discard_container(app_id: str, lines: list[str]) -> None:
+    """Best-effort teardown; a cleanup failure must not mask the real error."""
+    try:
+        backends.get_backend().remove(app_id, missing_ok=True)
+        lines.append("removed the unreachable container")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"could not remove the unreachable container: {exc}")
 
 
 def _fail(sess, app, deployment, lines: list[str], message: str) -> None:

@@ -159,7 +159,7 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
 sudo apt update && sudo apt install -y caddy
 ```
 
-`/etc/caddy/Caddyfile`:
+`/etc/caddy/Caddyfile` — this covers the control plane only:
 
 ```caddyfile
 yourname.duckdns.org {
@@ -174,9 +174,32 @@ sudo systemctl reload caddy
 HTTPS should work within seconds. If it doesn't, revisit step 2 — Let's Encrypt
 has to reach port 80 to issue the certificate.
 
-> **Not built yet:** per-app routing. Hangar still returns
-> `http://localhost:<random-port>`, so apps aren't shareable until the deploy
-> engine writes Caddy config per app. That's the next piece of work.
+### Per-app routing
+
+Hangar adds and removes routes for deployed apps itself, through Caddy's admin
+API (`localhost:2019`, enabled by default). You don't write Caddyfile entries
+for apps.
+
+```bash
+export HANGAR_ROUTER=caddy
+export HANGAR_APP_DOMAIN=yourname.duckdns.org
+export HANGAR_CADDY_ADMIN_URL=http://localhost:2019
+```
+
+An app named `sales-tool` is then reachable at
+`https://sales-tool.yourname.duckdns.org`, and that URL survives restarts even
+though the container's port changes.
+
+DuckDNS resolves any `*.yourname.duckdns.org` to the same IP, so no extra DNS
+setup is needed. Caddy obtains a certificate per hostname on first request.
+
+**If Caddy already serves other sites**, set `HANGAR_CADDY_SERVER` to that
+server's name. Hangar refuses to overwrite an existing configuration, and only
+ever touches routes whose id begins with `hangar-`.
+
+Routes are inserted at the *front* of the route list, ahead of any catch-all —
+Caddy evaluates routes in order, so an appended route behind a catch-all would
+never be reached.
 
 ---
 

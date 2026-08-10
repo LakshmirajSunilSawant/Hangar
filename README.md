@@ -21,8 +21,8 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Pluggable execution backend | working |
 | Env-driven config, Postgres support | working |
 | API token auth on the control plane | working |
+| Caddy routing / stable per-app hostnames | working |
 | Ingestion: zip upload / GitHub repo | not started |
-| Caddy routing / stable per-app hostnames | not started |
 | Static security scan (Semgrep / Bandit / osv-scanner) | not started |
 | Owner dashboard (React + Vite) | not started |
 | Auth + permissions (Ory Kratos) | not started |
@@ -108,6 +108,12 @@ redacted).
 | `HANGAR_APP_MEMORY_MB` | `512` | Per-app memory cap |
 | `HANGAR_APP_CPUS` | `0.5` | Per-app CPU cap |
 | `HANGAR_APP_PIDS` | `256` | Per-app process cap |
+| `HANGAR_ROUTER` | `none` | `caddy` gives apps stable hostnames |
+| `HANGAR_APP_DOMAIN` | unset | Apps are served at `<name>.<domain>` |
+| `HANGAR_APP_SCHEME` | `https` | Scheme for generated app URLs |
+| `HANGAR_CADDY_ADMIN_URL` | `http://localhost:2019` | Caddy's admin API |
+| `HANGAR_CADDY_SERVER` | `srv0` | Which Caddy server holds the routes |
+| `HANGAR_UPSTREAM_HOST` | `127.0.0.1` | Where Caddy dials app containers |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -125,6 +131,25 @@ in that state, so an anonymous control plane can't be exposed by accident.
 This guards the control plane's own API. It is *not* the PRD's auth layer:
 per-user identity and owner/editor/viewer permissions via Ory Kratos are still
 Milestone 3.
+
+### Routing
+
+By default apps come back as `http://localhost:<random-port>` — fine on one
+machine, useless for sharing. With `HANGAR_ROUTER=caddy` and an
+`HANGAR_APP_DOMAIN`, each app gets a stable hostname instead:
+
+```
+sales-tool.apps.example.com   →  container on :64800
+standup-bot.apps.example.com  →  container on :51203
+```
+
+Hangar drives Caddy's admin API directly, so there's no Caddyfile to write and
+no reload to sequence. Routes are tagged `hangar-<app_id>`, which makes updates
+idempotent and leaves any other sites Caddy serves alone. The hostname survives
+restarts even when the container's port changes — that's the point of it.
+
+Routes are inserted at the front of Caddy's route list. Caddy matches routes in
+order, so a route appended behind a catch-all is never reached.
 
 ### Swapping the sandbox
 
@@ -164,6 +189,7 @@ hangar/
     base.py      the ExecutionBackend interface — no Docker import
     docker_backend.py  local Docker implementation
   deploy.py      orchestration: detect -> build -> run, with status transitions
+  routing.py     per-app hostnames via Caddy's admin API
   store.py       persistence (App, Deployment) on SQLite or Postgres
   config.py      environment-driven settings
   auth.py        shared-token API auth

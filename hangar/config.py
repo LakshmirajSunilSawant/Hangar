@@ -34,19 +34,41 @@ class Settings:
     memory_mb: int
     cpus: float
     pids: int
+    router: str
+    app_domain: str | None
+    app_scheme: str
+    caddy_admin_url: str
+    caddy_server: str
+    caddy_listen: str
+    upstream_host: str
 
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_token)
 
     def url_for_port(self, port: int) -> str:
-        """Public URL for an app published on ``port``.
+        """Direct URL for an app published on ``port``.
 
-        Once Caddy fronts the apps this becomes a per-app hostname instead of a
-        port, which is why callers go through here rather than formatting URLs
-        themselves.
+        Only used when no router fronts the apps; with routing enabled an app
+        is reached by hostname and the port stays internal.
         """
         return f"{self.public_base_url.rstrip('/')}:{port}"
+
+    def url_for_app(self, app_name: str) -> str:
+        """Stable public URL for an app, once a router is in front of it."""
+        if not self.app_domain:
+            raise ValueError(
+                "HANGAR_APP_DOMAIN must be set to give apps stable URLs"
+            )
+        return f"{self.app_scheme}://{self.hostname_for_app(app_name)}"
+
+    def hostname_for_app(self, app_name: str) -> str:
+        """Per-app hostname. App names are already validated as DNS labels."""
+        if not self.app_domain:
+            raise ValueError(
+                "HANGAR_APP_DOMAIN must be set to give apps stable URLs"
+            )
+        return f"{app_name}.{self.app_domain.strip('.')}"
 
 
 def settings() -> Settings:
@@ -61,6 +83,18 @@ def settings() -> Settings:
         memory_mb=_int("HANGAR_APP_MEMORY_MB", DEFAULT_MEMORY_MB),
         cpus=_float("HANGAR_APP_CPUS", DEFAULT_CPUS),
         pids=_int("HANGAR_APP_PIDS", DEFAULT_PIDS),
+        # "none" keeps the direct host:port URLs, which is all a laptop needs.
+        router=os.environ.get("HANGAR_ROUTER", "none"),
+        app_domain=_str("HANGAR_APP_DOMAIN"),
+        app_scheme=os.environ.get("HANGAR_APP_SCHEME", "https"),
+        caddy_admin_url=os.environ.get(
+            "HANGAR_CADDY_ADMIN_URL", "http://localhost:2019"
+        ),
+        caddy_server=os.environ.get("HANGAR_CADDY_SERVER", "srv0"),
+        caddy_listen=os.environ.get("HANGAR_CADDY_LISTEN", ":80"),
+        # Where Caddy should dial to reach app containers. Loopback when Caddy
+        # runs on the host; host.docker.internal when Caddy is containerised.
+        upstream_host=os.environ.get("HANGAR_UPSTREAM_HOST", "127.0.0.1"),
     )
 
 

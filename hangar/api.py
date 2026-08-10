@@ -13,11 +13,12 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import backends, config
+from . import backends, config, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import require_token
 from .backends import BackendError
+from .routing import RoutingError
 from .store import AppStatus
 
 api = FastAPI(
@@ -92,10 +93,14 @@ def healthz() -> dict:
     """Unauthenticated health check, for platform probes and uptime pingers."""
     settings = config.settings()
     backend = backends.get_backend()
+    router = routing.get_router()
     return {
         "status": "ok",
         "backend": backend.name,
         "backend_available": backend.available(),
+        "router": router.name,
+        "router_available": router.available(),
+        "app_domain": settings.app_domain,
         "auth": "enabled" if settings.auth_enabled else "disabled",
         "sandbox_runtime": settings.sandbox_runtime or "docker-default",
     }
@@ -180,6 +185,9 @@ def stop_app(app_id: str) -> AppView:
     with store.session() as sess:
         app = _require(sess, app_id)
         _act(backends.get_backend().stop, app_id)
+        # Withdraw the route too, so the hostname fails cleanly instead of
+        # proxying to a dead port.
+        _act(routing.get_router().remove, app_id)
         app.status = AppStatus.STOPPED
         app.url = None
         store.save(sess, app)
@@ -198,7 +206,15 @@ def restart_app(app_id: str) -> AppView:
         port = backend.host_port(app_id)
         if port is not None:
             app.host_port = port
-            app.url = config.settings().url_for_port(port)
+            # Re-point the route at the new port; the hostname is unchanged,
+            # which is the whole benefit of routing by name.
+            try:
+                app.url = routing.get_router().upsert(
+                    app_id=app.id, app_name=app.name, host_port=port
+                )
+            except RoutingError as exc:
+                raise HTTPException(409, str(exc)) from exc
+
         app.status = AppStatus.RUNNING
         store.save(sess, app)
         return AppView.of(app)
@@ -209,6 +225,7 @@ def delete_app(app_id: str) -> None:
     with store.session() as sess:
         app = _require(sess, app_id)
         backends.get_backend().remove(app_id, missing_ok=True)
+        routing.get_router().remove(app_id, missing_ok=True)
         for deployment in store.deployments_for(sess, app_id):
             sess.delete(deployment)
         sess.delete(app)
@@ -230,7 +247,7 @@ def _require(sess, app_id: str) -> store.App:
 def _act(action, app_id: str) -> None:
     try:
         action(app_id)
-    except BackendError as exc:
+    except (BackendError, RoutingError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 

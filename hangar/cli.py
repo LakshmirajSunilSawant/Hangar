@@ -46,14 +46,17 @@ def config_default_port() -> int:
 
 
 def _show_config() -> int:
-    from . import backends, config
+    from . import backends, config, routing
 
     settings = config.settings()
     backend = backends.get_backend()
+    router = routing.get_router()
 
     # The token is deliberately never printed, only its presence.
     print(f"database_url     {_redact(settings.database_url)}")
     print(f"backend          {settings.backend} (available: {backend.available()})")
+    print(f"router           {settings.router} (available: {router.available()})")
+    print(f"app_domain       {settings.app_domain or 'unset — apps get host:port URLs'}")
     print(f"auth             {'enabled' if settings.auth_enabled else 'DISABLED'}")
     print(f"sandbox_runtime  {settings.sandbox_runtime or 'docker default (not gVisor)'}")
     print(f"public_base_url  {settings.public_base_url}")
