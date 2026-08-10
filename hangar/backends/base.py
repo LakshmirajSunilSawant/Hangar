@@ -62,8 +62,12 @@ class BuildResult:
 class RunningApp:
     container_id: str
     container_name: str
-    host_port: int
-    url: str
+    container_port: int
+    # None when egress is denied: an app on an internal network cannot publish
+    # a port to the host, so it is reachable only through the proxy.
+    host_port: int | None
+    # Address the router should dial to reach this app.
+    upstream: str
     status: str
 
 

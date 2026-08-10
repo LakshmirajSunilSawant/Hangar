@@ -41,10 +41,32 @@ class Settings:
     caddy_server: str
     caddy_listen: str
     upstream_host: str
+    scan_policy: str
+    scan_block_severity: str
+    egress: str
+    app_network: str
 
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_token)
+
+    @property
+    def scan_enabled(self) -> bool:
+        return self.scan_policy != "off"
+
+    @property
+    def egress_denied(self) -> bool:
+        return self.egress == "deny"
+
+    def validate(self) -> None:
+        """Reject combinations that cannot work, rather than failing at deploy."""
+        if self.egress_denied and self.router == "none":
+            raise ValueError(
+                "HANGAR_EGRESS=deny puts apps on an internal network with no "
+                "published ports, so they are only reachable through a proxy. "
+                "Set HANGAR_ROUTER=caddy (with Caddy attached to "
+                f"{self.app_network!r}), or use HANGAR_EGRESS=allow."
+            )
 
     def url_for_port(self, port: int) -> str:
         """Direct URL for an app published on ``port``.
@@ -95,6 +117,19 @@ def settings() -> Settings:
         # Where Caddy should dial to reach app containers. Loopback when Caddy
         # runs on the host; host.docker.internal when Caddy is containerised.
         upstream_host=os.environ.get("HANGAR_UPSTREAM_HOST", "127.0.0.1"),
+        # PRD §8: "flag (don't necessarily block in v1)". Findings are always
+        # recorded; "block" additionally refuses the deploy.
+        scan_policy=_choice(
+            "HANGAR_SCAN_POLICY", "flag", ("flag", "block", "off")
+        ),
+        scan_block_severity=_choice(
+            "HANGAR_SCAN_BLOCK_SEVERITY", "high", ("low", "medium", "high")
+        ),
+        # "deny" puts apps on an internal Docker network with no route out.
+        # That also removes host port publishing, so it requires a router on
+        # the same network — see Settings.validate().
+        egress=_choice("HANGAR_EGRESS", "allow", ("allow", "deny")),
+        app_network=os.environ.get("HANGAR_APP_NETWORK", "hangar-apps"),
     )
 
 
@@ -149,6 +184,15 @@ def _int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = (_str(name) or default).lower()
+    if value not in allowed:
+        raise ValueError(
+            f"{name} must be one of {', '.join(allowed)}, got {value!r}"
+        )
+    return value
 
 
 def _float(name: str, default: float) -> float:

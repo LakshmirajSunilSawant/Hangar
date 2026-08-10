@@ -91,7 +91,7 @@ def test_url_requires_a_domain(monkeypatch):
 
 
 def test_route_matches_host_and_proxies_to_the_port():
-    r = route("abc123", "sales.example.com", "127.0.0.1", 64800)
+    r = route("abc123", "sales.example.com", "127.0.0.1:64800")
 
     assert r["@id"] == "hangar-abc123"
     assert r["match"] == [{"host": ["sales.example.com"]}]
@@ -101,7 +101,7 @@ def test_route_matches_host_and_proxies_to_the_port():
 
 def test_route_is_terminal():
     """Without this, a later app's route could also handle the same request."""
-    assert route("abc", "h", "127.0.0.1", 1)["terminal"] is True
+    assert route("abc", "h", "127.0.0.1:1")["terminal"] is True
 
 
 def test_route_ids_are_namespaced_so_other_caddy_routes_are_untouched():
@@ -110,7 +110,7 @@ def test_route_ids_are_namespaced_so_other_caddy_routes_are_untouched():
 
 def test_upstream_host_is_configurable(monkeypatch):
     """Caddy in a container can't reach app containers over loopback."""
-    r = route("abc", "h", "host.docker.internal", 3000)
+    r = route("abc", "h", "host.docker.internal:3000")
     assert r["handle"][0]["upstreams"] == [{"dial": "host.docker.internal:3000"}]
 
 
@@ -120,7 +120,7 @@ def test_upstream_host_is_configurable(monkeypatch):
 
 
 def test_null_router_returns_the_direct_port_url():
-    url = NullRouter().upsert(app_id="a", app_name="app", host_port=8000)
+    url = NullRouter().upsert(app_id="a", app_name="app", upstream="127.0.0.1:8000", host_port=8000)
     assert url == "http://localhost:8000"
 
 
@@ -147,7 +147,7 @@ def test_upsert_bootstraps_an_empty_caddy(routed):
     session = StubSession({("GET", "/config/"): StubResponse(200, {})})
     router = CaddyRouter(session=session)
 
-    url = router.upsert(app_id="abc", app_name="sales", host_port=64800)
+    url = router.upsert(app_id="abc", app_name="sales", upstream="127.0.0.1:64800", host_port=64800)
 
     assert url == "https://sales.apps.example.com"
     assert "/load" in session.paths("POST")
@@ -164,7 +164,7 @@ def test_upsert_refuses_to_overwrite_an_existing_caddy_config(routed):
     })
     with pytest.raises(RoutingError, match="HANGAR_CADDY_SERVER"):
         CaddyRouter(session=session).upsert(
-            app_id="abc", app_name="sales", host_port=1
+            app_id="abc", app_name="sales", upstream="127.0.0.1:1", host_port=1
         )
 
     assert "/load" not in session.paths("POST")
@@ -176,7 +176,7 @@ def test_upsert_reuses_an_existing_hangar_server(routed):
             200, {"apps": {"http": {"servers": {"srv0": {"routes": []}}}}}
         )
     })
-    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", host_port=8000)
+    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", upstream="127.0.0.1:8000", host_port=8000)
 
     assert "/load" not in session.paths("POST")
     assert "/config/apps/http/servers/srv0/routes/0" in session.paths("PUT")
@@ -193,7 +193,7 @@ def test_route_is_inserted_at_the_front_not_appended(routed):
             200, {"apps": {"http": {"servers": {"srv0": {"routes": []}}}}}
         )
     })
-    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", host_port=8000)
+    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", upstream="127.0.0.1:8000", host_port=8000)
 
     # PUT at index 0 inserts; POST to the array would append.
     assert session.paths("PUT") == ["/config/apps/http/servers/srv0/routes/0"]
@@ -207,7 +207,7 @@ def test_upsert_deletes_before_adding_so_redeploys_dont_duplicate(routed):
         ),
         ("DELETE", "/id/hangar-abc"): StubResponse(500, text="unknown object ID"),
     })
-    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", host_port=8000)
+    CaddyRouter(session=session).upsert(app_id="abc", app_name="sales", upstream="127.0.0.1:8000", host_port=8000)
 
     methods = [m for m, _, _ in session.calls]
     assert methods.index("DELETE") < methods.index("PUT")
@@ -237,7 +237,7 @@ def test_unreachable_caddy_is_reported_clearly(routed):
     router = CaddyRouter(session=DeadSession())
     assert router.available() is False
     with pytest.raises(RoutingError, match="could not reach Caddy"):
-        router.upsert(app_id="a", app_name="b", host_port=1)
+        router.upsert(app_id="a", app_name="b", upstream="127.0.0.1:1", host_port=1)
 
 
 def test_routing_without_a_domain_fails_as_a_routing_error(monkeypatch):
@@ -247,5 +247,5 @@ def test_routing_without_a_domain_fails_as_a_routing_error(monkeypatch):
 
     with pytest.raises(RoutingError, match="HANGAR_APP_DOMAIN"):
         CaddyRouter(session=StubSession()).upsert(
-            app_id="a", app_name="b", host_port=1
+            app_id="a", app_name="b", upstream="127.0.0.1:1", host_port=1
         )

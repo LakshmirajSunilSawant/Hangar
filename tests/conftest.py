@@ -108,8 +108,9 @@ class FakeBackend(ExecutionBackend):
         return RunningApp(
             container_id="fake",
             container_name=f"hangar-{app_id}",
+            container_port=container_port,
             host_port=port,
-            url=f"http://localhost:{port}",
+            upstream=f"127.0.0.1:{port}",
             status="running",
         )
 

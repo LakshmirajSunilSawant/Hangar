@@ -83,6 +83,17 @@ class LogsView(BaseModel):
     runtime_log: str
 
 
+class ScanView(BaseModel):
+    app_id: str
+    status: str
+    policy: str
+    counts: dict[str, int] = Field(default_factory=dict)
+    highest_severity: str | None = None
+    findings: list[dict] = Field(default_factory=list)
+    tools_run: list[str] = Field(default_factory=list)
+    tools_skipped: dict[str, str] = Field(default_factory=dict)
+
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
@@ -167,6 +178,28 @@ def get_logs(app_id: str, tail: int = 200) -> LogsView:
     return LogsView(app_id=app.id, build_log=build_log, runtime_log=runtime_log)
 
 
+@apps.get("/{app_id}/scan", response_model=ScanView)
+def get_scan(app_id: str) -> ScanView:
+    """Security findings from the most recent deployment's pre-execution scan."""
+    with store.session() as sess:
+        _require(sess, app_id)
+        deployment = store.latest_deployment(sess, app_id)
+        if deployment is None:
+            raise HTTPException(404, f"app {app_id} has not been deployed yet")
+
+        report = deployment.scan()
+        return ScanView(
+            app_id=app_id,
+            status=deployment.scan_status,
+            policy=config.settings().scan_policy,
+            counts=report.get("counts", {}),
+            highest_severity=report.get("highest_severity"),
+            findings=report.get("findings", []),
+            tools_run=report.get("tools_run", []),
+            tools_skipped=report.get("tools_skipped", {}),
+        )
+
+
 @apps.post("/{app_id}/redeploy", response_model=AppView, status_code=202)
 def redeploy(app_id: str, background: BackgroundTasks) -> AppView:
     with store.session() as sess:
@@ -203,17 +236,24 @@ def restart_app(app_id: str) -> AppView:
 
         # The published port can change across a restart, so re-read it from
         # the backend rather than trusting what was stored at deploy time.
+        # With egress denied there is no published port and the container-name
+        # upstream is stable, so the stored value stands.
         port = backend.host_port(app_id)
         if port is not None:
             app.host_port = port
-            # Re-point the route at the new port; the hostname is unchanged,
-            # which is the whole benefit of routing by name.
-            try:
-                app.url = routing.get_router().upsert(
-                    app_id=app.id, app_name=app.name, host_port=port
-                )
-            except RoutingError as exc:
-                raise HTTPException(409, str(exc)) from exc
+            app.upstream = f"{config.settings().upstream_host}:{port}"
+
+        # Re-point the route; the hostname is unchanged, which is the whole
+        # benefit of routing by name.
+        try:
+            app.url = routing.get_router().upsert(
+                app_id=app.id,
+                app_name=app.name,
+                upstream=app.upstream or "",
+                host_port=app.host_port,
+            )
+        except RoutingError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
         app.status = AppStatus.RUNNING
         store.save(sess, app)

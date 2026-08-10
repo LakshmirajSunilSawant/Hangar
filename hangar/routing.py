@@ -45,8 +45,15 @@ class Router(ABC):
         ...
 
     @abstractmethod
-    def upsert(self, *, app_id: str, app_name: str, host_port: int) -> str:
-        """Route ``app_name`` to ``host_port``. Returns the app's public URL."""
+    def upsert(
+        self, *, app_id: str, app_name: str, upstream: str, host_port: int | None
+    ) -> str:
+        """Route ``app_name`` to ``upstream``. Returns the app's public URL.
+
+        ``upstream`` is a dial address — loopback and a published port when
+        egress is allowed, or the container's name and port when apps sit on
+        an internal network. ``host_port`` is None in the latter case.
+        """
 
     @abstractmethod
     def remove(self, app_id: str, *, missing_ok: bool = True) -> None:
@@ -65,7 +72,14 @@ class NullRouter(Router):
     def available(self) -> bool:
         return True
 
-    def upsert(self, *, app_id: str, app_name: str, host_port: int) -> str:
+    def upsert(
+        self, *, app_id: str, app_name: str, upstream: str, host_port: int | None
+    ) -> str:
+        if host_port is None:
+            raise RoutingError(
+                "this app has no published port, so it cannot be reached "
+                "without a proxy — set HANGAR_ROUTER=caddy"
+            )
         return config.settings().url_for_port(host_port)
 
     def remove(self, app_id: str, *, missing_ok: bool = True) -> None:
@@ -91,7 +105,9 @@ class CaddyRouter(Router):
         except RoutingError:
             return False
 
-    def upsert(self, *, app_id: str, app_name: str, host_port: int) -> str:
+    def upsert(
+        self, *, app_id: str, app_name: str, upstream: str, host_port: int | None = None
+    ) -> str:
         try:
             hostname = self.settings.hostname_for_app(app_name)
         except ValueError as exc:
@@ -112,10 +128,10 @@ class CaddyRouter(Router):
         self._request(
             "PUT",
             f"/config/apps/http/servers/{self.server}/routes/0",
-            json=route(app_id, hostname, self.settings.upstream_host, host_port),
+            json=route(app_id, hostname, upstream),
             expect_ok=True,
         )
-        log.info("routed %s -> %s:%s", hostname, self.settings.upstream_host, host_port)
+        log.info("routed %s -> %s", hostname, upstream)
         return self.settings.url_for_app(app_name)
 
     def remove(self, app_id: str, *, missing_ok: bool = True) -> None:
@@ -207,15 +223,15 @@ def route_id(app_id: str) -> str:
     return f"{ROUTE_ID_PREFIX}{app_id}"
 
 
-def route(app_id: str, hostname: str, upstream_host: str, host_port: int) -> dict:
-    """A Caddy route sending one hostname to one upstream."""
+def route(app_id: str, hostname: str, upstream: str) -> dict:
+    """A Caddy route sending one hostname to one upstream dial address."""
     return {
         "@id": route_id(app_id),
         "match": [{"host": [hostname]}],
         "handle": [
             {
                 "handler": "reverse_proxy",
-                "upstreams": [{"dial": f"{upstream_host}:{host_port}"}],
+                "upstreams": [{"dial": upstream}],
             }
         ],
         # Without this, Caddy keeps evaluating later routes after this one

@@ -22,12 +22,12 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Env-driven config, Postgres support | working |
 | API token auth on the control plane | working |
 | Caddy routing / stable per-app hostnames | working |
+| Static security scan before execution | working |
+| Egress default-deny | working |
 | Ingestion: zip upload / GitHub repo | not started |
-| Static security scan (Semgrep / Bandit / osv-scanner) | not started |
 | Owner dashboard (React + Vite) | not started |
 | Auth + permissions (Ory Kratos) | not started |
 | Per-app database provisioning | not started |
-| Egress deny-by-default | not started |
 
 Measured locally (x86, WSL2, warm base image layers):
 
@@ -114,6 +114,10 @@ redacted).
 | `HANGAR_CADDY_ADMIN_URL` | `http://localhost:2019` | Caddy's admin API |
 | `HANGAR_CADDY_SERVER` | `srv0` | Which Caddy server holds the routes |
 | `HANGAR_UPSTREAM_HOST` | `127.0.0.1` | Where Caddy dials app containers |
+| `HANGAR_SCAN_POLICY` | `flag` | `flag`, `block`, or `off` |
+| `HANGAR_SCAN_BLOCK_SEVERITY` | `high` | Threshold when policy is `block` |
+| `HANGAR_EGRESS` | `allow` | `deny` removes apps' outbound network |
+| `HANGAR_APP_NETWORK` | `hangar-apps` | Internal network used when denying egress |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -190,6 +194,7 @@ hangar/
     docker_backend.py  local Docker implementation
   deploy.py      orchestration: detect -> build -> run, with status transitions
   routing.py     per-app hostnames via Caddy's admin API
+  scan.py        static security analysis — never executes what it scans
   store.py       persistence (App, Deployment) on SQLite or Postgres
   config.py      environment-driven settings
   auth.py        shared-token API auth
@@ -207,10 +212,48 @@ Per PRD §8, and honestly labelled:
 |---|---|
 | Hard resource caps (CPU, memory, PIDs) | enforced |
 | Non-root, `cap_drop: ALL`, no-new-privileges, read-only rootfs | enforced |
-| Untrusted code never executed during detection | enforced (static analysis only) |
-| gVisor/Kata sandbox | **not yet** — plain Docker, shares the host kernel |
-| Static scan before first execution | **not yet** |
-| Egress default-deny | **not yet** |
-| Platform-level auth in front of apps | **not yet** |
+| Untrusted code never executed during detection or scanning | enforced |
+| Static scan before first execution | enforced (`HANGAR_SCAN_POLICY`) |
+| Egress default-deny | available (`HANGAR_EGRESS=deny`), off by default |
+| gVisor/Kata sandbox | wired (`HANGAR_RUNTIME=runsc`), needs a Linux host |
+| Platform-level auth in front of apps | **not yet** — shared token on the API only |
+| Secrets injected at runtime, never in code | **not yet** |
 
-Until the first three of those land, only deploy code you wrote or trust.
+Until gVisor is actually in use, the kernel is shared with the host — only
+deploy code you wrote or have read.
+
+### Security scanning
+
+Every deploy is scanned **before** the build, because building installs the
+app's declared dependencies and that runs their setup code. By the time an
+image exists, untrusted code has already had a turn.
+
+The built-in scanner always runs and needs nothing installed — Python via
+`ast`, JavaScript via patterns — covering what PRD §8 names: `eval`/`exec`,
+shell execution, filesystem escapes, raw sockets, unsafe deserialisation. A
+security gate assembled only from optional tools does nothing at all on a
+machine where none are present, while still reporting success.
+
+Bandit, Semgrep, and osv-scanner are used when on `PATH` and recorded as
+skipped, with a reason, when not.
+
+```bash
+curl -H "Authorization: Bearer $HANGAR_API_TOKEN" \
+  http://127.0.0.1:8080/apps/<id>/scan
+```
+
+`HANGAR_SCAN_POLICY=flag` (default, per PRD v1) records findings and continues;
+`block` refuses any deploy with a finding at or above
+`HANGAR_SCAN_BLOCK_SEVERITY`; `off` skips it.
+
+### Egress deny
+
+`HANGAR_EGRESS=deny` puts apps on an internal Docker network with no route off
+the host — verified in the test suite by making a real outbound request from
+inside a sandbox and requiring it to fail, for both HTTP and DNS.
+
+The trade-off is unavoidable rather than a design choice: a container on an
+internal network **cannot publish a port to the host**, so apps are reachable
+only through a proxy attached to the same network. Hangar refuses to start with
+`HANGAR_EGRESS=deny` and `HANGAR_ROUTER=none` rather than leave apps silently
+unreachable. Attach Caddy to `$HANGAR_APP_NETWORK` when using this mode.

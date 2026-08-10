@@ -12,6 +12,7 @@ at an auth design that hasn't been built.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -45,6 +46,13 @@ class DeploymentStatus(str, Enum):
     FAILED = "failed"
 
 
+class ScanStatus(str, Enum):
+    SKIPPED = "skipped"
+    CLEAN = "clean"
+    FLAGGED = "flagged"   # findings recorded, deploy continued
+    BLOCKED = "blocked"   # findings above the threshold, deploy refused
+
+
 class App(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     name: str = Field(index=True)
@@ -55,6 +63,9 @@ class App(SQLModel, table=True):
     status: str = AppStatus.QUEUED
     url: str | None = None
     host_port: int | None = None
+    # Dial address the router uses. Stored because with egress denied there is
+    # no host port to recompute it from on restart.
+    upstream: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -67,8 +78,20 @@ class Deployment(SQLModel, table=True):
     image_ref: str | None = None
     build_log: str = ""
     error: str | None = None
+    scan_status: str = ScanStatus.SKIPPED
+    # Serialised ScanResult. JSON in a text column rather than its own table:
+    # findings are only ever read as a whole, per deployment.
+    scan_report: str = ""
     created_at: datetime = Field(default_factory=utcnow)
     finished_at: datetime | None = None
+
+    def scan(self) -> dict:
+        if not self.scan_report:
+            return {}
+        try:
+            return json.loads(self.scan_report)
+        except json.JSONDecodeError:
+            return {}
 
 
 # --------------------------------------------------------------------------

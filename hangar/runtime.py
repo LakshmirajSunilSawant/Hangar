@@ -61,13 +61,15 @@ def run(
     """Start ``image_tag`` as an app container and return how to reach it."""
     dc = docker_client or client()
     settings = config.settings()
+    settings.validate()
     limits = limits or ResourceLimits.from_settings(settings)
     container_name = _container_name(app_id)
 
     # A redeploy of the same app replaces the previous container.
     remove(app_id, docker_client=dc, missing_ok=True)
 
-    port = host_port or _free_port()
+    deny_egress = settings.egress_denied
+    port = None if deny_egress else (host_port or _free_port())
     environment = {
         "PORT": str(container_port),
         "HANGAR_APP_ID": app_id,
@@ -79,7 +81,6 @@ def run(
         "name": container_name,
         "detach": True,
         "environment": environment,
-        "ports": {f"{container_port}/tcp": port},
         "labels": {
             LABEL_MANAGED: "true",
             LABEL_APP_ID: app_id,
@@ -101,6 +102,18 @@ def run(
     if settings.sandbox_runtime:
         kwargs["runtime"] = settings.sandbox_runtime
 
+    if deny_egress:
+        # An internal network has no route off the host, which satisfies PRD §8's
+        # default-deny. It also means Docker cannot publish a port for this
+        # container, so the proxy has to be on this network to reach it.
+        _ensure_internal_network(dc, settings.app_network)
+        kwargs["network"] = settings.app_network
+        # Container-to-container over Docker's embedded DNS, by name.
+        upstream = f"{container_name}:{container_port}"
+    else:
+        kwargs["ports"] = {f"{container_port}/tcp": port}
+        upstream = f"{settings.upstream_host}:{port}"
+
     try:
         container = dc.containers.run(image_tag, **kwargs)
     except ImageNotFound as exc:
@@ -112,10 +125,34 @@ def run(
     return RunningApp(
         container_id=container.id,
         container_name=container_name,
+        container_port=container_port,
         host_port=port,
-        url=settings.url_for_port(port),
+        upstream=upstream,
         status=container.status,
     )
+
+
+def _ensure_internal_network(dc, name: str):
+    """Create the app network if absent. `internal=True` is what denies egress."""
+    try:
+        network = dc.networks.get(name)
+    except NotFound:
+        try:
+            return dc.networks.create(name, driver="bridge", internal=True)
+        except APIError as exc:
+            raise DeployError(f"could not create network {name!r}: {exc}") from exc
+    except APIError as exc:
+        raise DeployError(f"could not inspect network {name!r}: {exc}") from exc
+
+    # An existing non-internal network would silently leave apps with full
+    # outbound access while reporting that egress is denied.
+    if not network.attrs.get("Internal", False):
+        raise DeployError(
+            f"network {name!r} exists but is not internal, so egress would not "
+            "actually be denied. Remove it (docker network rm "
+            f"{name}) and let Hangar recreate it."
+        )
+    return network
 
 
 def status(app_id: str, *, docker_client: docker.DockerClient | None = None) -> str:

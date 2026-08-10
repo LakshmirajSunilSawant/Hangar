@@ -8,16 +8,21 @@ queued -> building -> running (or failed, with the error attached).
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
-from . import backends, routing, store
+from . import backends, config, routing, scan, store
 from .backends import BackendError
 from .detect import DetectionError, detect
 from .routing import RoutingError
-from .store import AppStatus, Deployment, DeploymentStatus
+from .store import AppStatus, Deployment, DeploymentStatus, ScanStatus
 
 log = logging.getLogger("hangar.deploy")
+
+
+class ScanBlocked(Exception):
+    """The security scan refused the deploy under a 'block' policy."""
 
 
 def image_tag(app: store.App) -> str:
@@ -59,6 +64,14 @@ def deploy(app_id: str) -> None:
             app.framework = detection.framework
             store.save(sess, app)
 
+            # Scan before the build, not after: a build installs the app's
+            # declared dependencies, which runs their setup code. By the time
+            # an image exists, untrusted code has already had a turn.
+            _scan(deployment, source, record)
+            store.save(sess, deployment)
+            if deployment.scan_status == ScanStatus.BLOCKED:
+                raise ScanBlocked(deployment.error or "blocked by security scan")
+
             result = backend.build(source, detection, image_tag(app), on_log=record)
 
             running = backend.run(
@@ -71,7 +84,10 @@ def deploy(app_id: str) -> None:
             # Publishing the route is what makes the app shareable; without a
             # router this returns the direct host:port URL unchanged.
             url = routing.get_router().upsert(
-                app_id=app.id, app_name=app.name, host_port=running.host_port
+                app_id=app.id,
+                app_name=app.name,
+                upstream=running.upstream,
+                host_port=running.host_port,
             )
             record(f"running at {url}")
 
@@ -83,8 +99,9 @@ def deploy(app_id: str) -> None:
             app.status = AppStatus.RUNNING
             app.url = url
             app.host_port = running.host_port
+            app.upstream = running.upstream
             store.save(sess, app, deployment)
-            log.info("app %s (%s) deployed to %s", app.name, app.id, running.url)
+            log.info("app %s (%s) deployed to %s", app.name, app.id, url)
 
         except RoutingError as exc:
             # The container started but isn't reachable. Leaving it running
@@ -92,11 +109,50 @@ def deploy(app_id: str) -> None:
             # deploy, so undo it.
             _discard_container(app.id, lines)
             _fail(sess, app, deployment, lines, str(exc))
-        except (DetectionError, BackendError) as exc:
+        except (DetectionError, BackendError, ScanBlocked) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread
             log.exception("unexpected failure deploying %s", app_id)
             _fail(sess, app, deployment, lines, f"unexpected error: {exc}")
+
+
+def _scan(deployment, source: Path, record) -> None:
+    """Run the security scan and record its verdict on the deployment."""
+    settings = config.settings()
+    if not settings.scan_enabled:
+        deployment.scan_status = ScanStatus.SKIPPED
+        record("security scan skipped (HANGAR_SCAN_POLICY=off)")
+        return
+
+    result = scan.scan(source)
+    deployment.scan_report = json.dumps(result.as_dict())
+    record(f"security scan: {result.summary()}")
+
+    for note, reason in result.tools_skipped.items():
+        record(f"  scanner unavailable: {note} ({reason})")
+    for finding in result.findings[:20]:
+        record(
+            f"  [{finding.severity}] {finding.file}:{finding.line} "
+            f"{finding.rule} — {finding.message}"
+        )
+    if len(result.findings) > 20:
+        record(f"  ... and {len(result.findings) - 20} more")
+
+    if not result.findings:
+        deployment.scan_status = ScanStatus.CLEAN
+        return
+
+    blocking = result.at_or_above(settings.scan_block_severity)
+    if settings.scan_policy == "block" and blocking:
+        deployment.scan_status = ScanStatus.BLOCKED
+        deployment.error = (
+            f"blocked by security scan: {len(blocking)} finding(s) at or above "
+            f"{settings.scan_block_severity} severity"
+        )
+        record(deployment.error)
+        return
+
+    deployment.scan_status = ScanStatus.FLAGGED
 
 
 def _discard_container(app_id: str, lines: list[str]) -> None:
