@@ -1,8 +1,8 @@
 """Persistence for the control plane.
 
-SQLite via SQLModel — the PRD reserves Postgres for per-app databases, but the
-control plane's own state is small enough that a single file keeps the MVP
-dependency-free.
+Driven by DATABASE_URL. SQLite by default, so a laptop needs no setup;
+Postgres when a URL is supplied, since a hosted control plane needs state that
+survives a restart and free-tier hosts rarely offer a persistent disk.
 
 This covers the App and Deployment halves of the PRD's data model. User,
 Permission, AppDatabase, and ResourceUsage arrive with the auth, database, and
@@ -12,13 +12,14 @@ at an auth design that hasn't been built.
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
 from sqlmodel import Field, Session, SQLModel, create_engine, select
+
+from . import config
 
 
 def utcnow() -> datetime:
@@ -75,29 +76,34 @@ class Deployment(SQLModel, table=True):
 # --------------------------------------------------------------------------
 
 
-def default_db_path() -> Path:
-    override = os.environ.get("HANGAR_DB")
-    if override:
-        return Path(override)
-    return Path.cwd() / ".hangar" / "hangar.db"
-
-
 _engine = None
 
 
 def engine(db_path: Path | str | None = None):
-    """Process-wide engine, created on first use."""
+    """Process-wide engine, created on first use.
+
+    ``db_path`` is a convenience for tests; normal callers get whatever
+    DATABASE_URL (or the SQLite default) resolves to.
+    """
     global _engine
     if _engine is None or db_path is not None:
-        path = Path(db_path) if db_path else default_db_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _engine = create_engine(
-            f"sqlite:///{path}",
-            # Deploys run on background threads, so connections cross threads.
-            connect_args={"check_same_thread": False},
-        )
+        url = f"sqlite:///{Path(db_path)}" if db_path else config.database_url()
+        _engine = create_engine(url, **_engine_options(url))
         SQLModel.metadata.create_all(_engine)
     return _engine
+
+
+def _engine_options(url: str) -> dict:
+    if url.startswith("sqlite"):
+        path = url.split("///", 1)[-1]
+        if path and path != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # Deploys run on background threads, so connections cross threads.
+        return {"connect_args": {"check_same_thread": False}}
+
+    # Managed Postgres (Render, Neon, Supabase) drops idle connections; without
+    # pre-ping the first query after an idle period fails on a dead socket.
+    return {"pool_pre_ping": True, "pool_recycle": 300}
 
 
 def reset_engine() -> None:

@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import builder, runtime, store
-from .builder import BuildFailed
+from . import backends, store
+from .backends import BackendError
 from .detect import DetectionError, detect
 from .store import AppStatus, Deployment, DeploymentStatus
 
@@ -44,6 +44,13 @@ def deploy(app_id: str) -> None:
             lines.append(line)
 
         try:
+            backend = backends.get_backend()
+            if not backend.available():
+                raise BackendError(
+                    f"the {backend.name} execution backend is unavailable — "
+                    "is Docker running?"
+                )
+
             detection = detect(source)
             record(f"detected {detection.runtime}/{detection.framework}")
 
@@ -51,11 +58,9 @@ def deploy(app_id: str) -> None:
             app.framework = detection.framework
             store.save(sess, app)
 
-            result = builder.build(
-                source, detection, image_tag(app), on_log=record
-            )
+            result = backend.build(source, detection, image_tag(app), on_log=record)
 
-            running = runtime.run(
+            running = backend.run(
                 result.image_tag,
                 app_id=app.id,
                 app_name=app.name,
@@ -74,7 +79,7 @@ def deploy(app_id: str) -> None:
             store.save(sess, app, deployment)
             log.info("app %s (%s) deployed to %s", app.name, app.id, running.url)
 
-        except (DetectionError, BuildFailed, runtime.DeployError) as exc:
+        except (DetectionError, BackendError) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread
             log.exception("unexpected failure deploying %s", app_id)

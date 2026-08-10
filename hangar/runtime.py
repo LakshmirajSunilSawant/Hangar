@@ -10,42 +10,32 @@ gVisor is available on the host and it will be used automatically.
 
 from __future__ import annotations
 
-import os
 import socket
-from dataclasses import dataclass
 from typing import Any
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
-# Per-app caps, so one runaway app can't degrade the platform (PRD §8).
-DEFAULT_MEMORY_MB = 512
-DEFAULT_CPUS = 0.5
-DEFAULT_PIDS_LIMIT = 256
+from . import config
+from .backends.base import DeployError, ResourceLimits, RunningApp
 
 LABEL_MANAGED = "hangar.managed"
 LABEL_APP_ID = "hangar.app_id"
 LABEL_APP_NAME = "hangar.app_name"
 
-
-class DeployError(Exception):
-    """Raised when a container could not be started or acted on."""
-
-
-@dataclass
-class RunningApp:
-    container_id: str
-    container_name: str
-    host_port: int
-    url: str
-    status: str
-
-
-@dataclass
-class ResourceLimits:
-    memory_mb: int = DEFAULT_MEMORY_MB
-    cpus: float = DEFAULT_CPUS
-    pids: int = DEFAULT_PIDS_LIMIT
+__all__ = [
+    "DeployError",
+    "ResourceLimits",
+    "RunningApp",
+    "client",
+    "host_port",
+    "logs",
+    "remove",
+    "restart",
+    "run",
+    "status",
+    "stop",
+]
 
 
 def client() -> docker.DockerClient:
@@ -70,7 +60,8 @@ def run(
 ) -> RunningApp:
     """Start ``image_tag`` as an app container and return how to reach it."""
     dc = docker_client or client()
-    limits = limits or ResourceLimits()
+    settings = config.settings()
+    limits = limits or ResourceLimits.from_settings(settings)
     container_name = _container_name(app_id)
 
     # A redeploy of the same app replaces the previous container.
@@ -107,9 +98,8 @@ def run(
         "restart_policy": {"Name": "unless-stopped"},
     }
 
-    sandbox_runtime = os.environ.get("HANGAR_RUNTIME")
-    if sandbox_runtime:
-        kwargs["runtime"] = sandbox_runtime
+    if settings.sandbox_runtime:
+        kwargs["runtime"] = settings.sandbox_runtime
 
     try:
         container = dc.containers.run(image_tag, **kwargs)
@@ -123,7 +113,7 @@ def run(
         container_id=container.id,
         container_name=container_name,
         host_port=port,
-        url=f"http://localhost:{port}",
+        url=settings.url_for_port(port),
         status=container.status,
     )
 

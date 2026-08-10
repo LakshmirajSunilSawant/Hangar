@@ -8,8 +8,9 @@ run path is covered in test_deploy.py.
 import pytest
 
 from hangar import api as api_mod
+from hangar import backends
 from hangar import deploy as deploy_mod
-from hangar import runtime, store
+from hangar import store
 
 
 @pytest.fixture
@@ -24,8 +25,14 @@ def source(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def backend(fake_backend):
+    """Every test in this module runs against the no-op backend."""
+    return fake_backend
+
+
+@pytest.fixture(autouse=True)
 def no_real_deploys(monkeypatch):
-    """Keep the API tests off Docker."""
+    """Keep the API tests off the deploy pipeline entirely."""
     calls = []
     monkeypatch.setattr(deploy_mod, "deploy", lambda app_id: calls.append(app_id))
     monkeypatch.setattr(api_mod.deploy_mod, "deploy", lambda app_id: calls.append(app_id))
@@ -41,8 +48,11 @@ def create(client, source, name="test-app"):
 # --------------------------------------------------------------------------
 
 
-def test_health(client):
-    assert client.get("/healthz").json() == {"status": "ok"}
+def test_health_reports_configuration(client):
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
+    assert body["backend"] == "fake"
+    assert body["auth"] == "disabled"
 
 
 def test_create_returns_202_and_queued_app(client, source):
@@ -119,7 +129,7 @@ def test_logs_include_build_log_and_survive_missing_container(client, source):
 # --------------------------------------------------------------------------
 
 
-def test_stop_marks_stopped_and_clears_url(client, source, monkeypatch):
+def test_stop_marks_stopped_and_clears_url(client, source, backend):
     app_id = create(client, source).json()["id"]
     with store.session() as sess:
         app = store.get_app(sess, app_id)
@@ -127,30 +137,24 @@ def test_stop_marks_stopped_and_clears_url(client, source, monkeypatch):
         app.url = "http://localhost:9999"
         store.save(sess, app)
 
-    monkeypatch.setattr(runtime, "stop", lambda app_id, **kw: None)
     body = client.post(f"/apps/{app_id}/stop").json()
     assert body["status"] == "stopped"
     assert body["url"] is None
 
 
-def test_restart_rereads_the_published_port(client, source, monkeypatch):
+def test_restart_rereads_the_published_port(client, source, backend):
     """Docker can republish on a different port, so the stored URL must refresh."""
     app_id = create(client, source).json()["id"]
-    monkeypatch.setattr(runtime, "restart", lambda app_id, **kw: None)
-    monkeypatch.setattr(runtime, "host_port", lambda app_id, **kw: 54321)
+    backend.port = 54321
 
     body = client.post(f"/apps/{app_id}/restart").json()
     assert body["status"] == "running"
     assert body["url"] == "http://localhost:54321"
 
 
-def test_lifecycle_action_on_missing_container_is_409(client, source, monkeypatch):
+def test_lifecycle_action_on_missing_container_is_409(client, source, backend):
     app_id = create(client, source).json()["id"]
-
-    def boom(app_id, **kw):
-        raise runtime.DeployError("no container for app")
-
-    monkeypatch.setattr(runtime, "stop", boom)
+    backend.errors["stop"] = "no container for app"
     assert client.post(f"/apps/{app_id}/stop").status_code == 409
 
 
@@ -164,13 +168,12 @@ def test_redeploy_requeues(client, source, no_real_deploys):
     assert no_real_deploys == [app_id]
 
 
-def test_delete_removes_app_and_its_deployments(client, source, monkeypatch):
+def test_delete_removes_app_and_its_deployments(client, source, backend):
     app_id = create(client, source).json()["id"]
     with store.session() as sess:
         sess.add(store.Deployment(app_id=app_id, build_log="x"))
         sess.commit()
 
-    monkeypatch.setattr(runtime, "remove", lambda app_id, **kw: None)
     assert client.delete(f"/apps/{app_id}").status_code == 204
     assert client.get(f"/apps/{app_id}").status_code == 404
 

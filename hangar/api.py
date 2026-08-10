@@ -1,8 +1,8 @@
 """Hangar control plane API.
 
-No auth yet — this is the thin vertical slice from the PRD's Milestone 2
-("does the box work"), and the auth/permission layer is Milestone 3. Until
-that lands, bind this to localhost only.
+Routes under /apps require the shared bearer token from HANGAR_API_TOKEN
+(see auth.py). That guards the control plane itself; per-user identity and
+owner/editor/viewer permissions are still Milestone 3.
 """
 
 from __future__ import annotations
@@ -10,11 +10,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from . import backends, config
 from . import deploy as deploy_mod
-from . import runtime, store
+from . import store
+from .auth import require_token
+from .backends import BackendError
 from .store import AppStatus
 
 api = FastAPI(
@@ -22,6 +25,10 @@ api = FastAPI(
     description="Cloud for small software — deploy a generated app to a live URL.",
     version="0.1.0",
 )
+
+# Everything under /apps is authenticated. /healthz stays open so a platform
+# health check or uptime pinger doesn't need the token.
+apps = APIRouter(prefix="/apps", tags=["apps"], dependencies=[Depends(require_token)])
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 
@@ -80,12 +87,21 @@ class LogsView(BaseModel):
 # --------------------------------------------------------------------------
 
 
-@api.get("/healthz")
+@api.get("/healthz", tags=["meta"])
 def healthz() -> dict:
-    return {"status": "ok"}
+    """Unauthenticated health check, for platform probes and uptime pingers."""
+    settings = config.settings()
+    backend = backends.get_backend()
+    return {
+        "status": "ok",
+        "backend": backend.name,
+        "backend_available": backend.available(),
+        "auth": "enabled" if settings.auth_enabled else "disabled",
+        "sandbox_runtime": settings.sandbox_runtime or "docker-default",
+    }
 
 
-@api.post("/apps", response_model=AppView, status_code=202)
+@apps.post("", response_model=AppView, status_code=202)
 def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppView:
     """Register an app and kick off a deploy.
 
@@ -118,19 +134,19 @@ def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppVie
     return view
 
 
-@api.get("/apps", response_model=list[AppView])
+@apps.get("", response_model=list[AppView])
 def list_apps() -> list[AppView]:
     with store.session() as sess:
         return [AppView.of(app) for app in store.list_apps(sess)]
 
 
-@api.get("/apps/{app_id}", response_model=AppView)
+@apps.get("/{app_id}", response_model=AppView)
 def get_app(app_id: str) -> AppView:
     with store.session() as sess:
         return AppView.of(_require(sess, app_id))
 
 
-@api.get("/apps/{app_id}/logs", response_model=LogsView)
+@apps.get("/{app_id}/logs", response_model=LogsView)
 def get_logs(app_id: str, tail: int = 200) -> LogsView:
     with store.session() as sess:
         app = _require(sess, app_id)
@@ -138,15 +154,15 @@ def get_logs(app_id: str, tail: int = 200) -> LogsView:
         build_log = deployment.build_log if deployment else ""
 
     try:
-        runtime_log = runtime.logs(app_id, tail=tail)
-    except runtime.DeployError:
+        runtime_log = backends.get_backend().logs(app_id, tail=tail)
+    except BackendError:
         # No container yet (or already removed) — the build log still matters.
         runtime_log = ""
 
     return LogsView(app_id=app.id, build_log=build_log, runtime_log=runtime_log)
 
 
-@api.post("/apps/{app_id}/redeploy", response_model=AppView, status_code=202)
+@apps.post("/{app_id}/redeploy", response_model=AppView, status_code=202)
 def redeploy(app_id: str, background: BackgroundTasks) -> AppView:
     with store.session() as sess:
         app = _require(sess, app_id)
@@ -159,39 +175,40 @@ def redeploy(app_id: str, background: BackgroundTasks) -> AppView:
     return view
 
 
-@api.post("/apps/{app_id}/stop", response_model=AppView)
+@apps.post("/{app_id}/stop", response_model=AppView)
 def stop_app(app_id: str) -> AppView:
     with store.session() as sess:
         app = _require(sess, app_id)
-        _act(runtime.stop, app_id)
+        _act(backends.get_backend().stop, app_id)
         app.status = AppStatus.STOPPED
         app.url = None
         store.save(sess, app)
         return AppView.of(app)
 
 
-@api.post("/apps/{app_id}/restart", response_model=AppView)
+@apps.post("/{app_id}/restart", response_model=AppView)
 def restart_app(app_id: str) -> AppView:
+    backend = backends.get_backend()
     with store.session() as sess:
         app = _require(sess, app_id)
-        _act(runtime.restart, app_id)
+        _act(backend.restart, app_id)
 
         # The published port can change across a restart, so re-read it from
-        # Docker rather than trusting what was stored at deploy time.
-        port = runtime.host_port(app_id)
+        # the backend rather than trusting what was stored at deploy time.
+        port = backend.host_port(app_id)
         if port is not None:
             app.host_port = port
-            app.url = f"http://localhost:{port}"
+            app.url = config.settings().url_for_port(port)
         app.status = AppStatus.RUNNING
         store.save(sess, app)
         return AppView.of(app)
 
 
-@api.delete("/apps/{app_id}", status_code=204)
+@apps.delete("/{app_id}", status_code=204)
 def delete_app(app_id: str) -> None:
     with store.session() as sess:
         app = _require(sess, app_id)
-        runtime.remove(app_id, missing_ok=True)
+        backends.get_backend().remove(app_id, missing_ok=True)
         for deployment in store.deployments_for(sess, app_id):
             sess.delete(deployment)
         sess.delete(app)
@@ -213,5 +230,8 @@ def _require(sess, app_id: str) -> store.App:
 def _act(action, app_id: str) -> None:
     try:
         action(app_id)
-    except runtime.DeployError as exc:
+    except BackendError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+api.include_router(apps)

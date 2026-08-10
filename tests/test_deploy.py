@@ -12,8 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hangar import deploy as deploy_mod
-from hangar import runtime, store
+from hangar import config, runtime, store
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -164,12 +163,55 @@ def test_resource_caps_are_applied(client, docker_available):
 
         container = docker_sdk.from_env().containers.get(f"hangar-{app_id}")
         host_config = container.attrs["HostConfig"]
+        limits = config.settings()
 
-        assert host_config["Memory"] == runtime.DEFAULT_MEMORY_MB * 1024 * 1024
-        assert host_config["NanoCpus"] == int(runtime.DEFAULT_CPUS * 1_000_000_000)
-        assert host_config["PidsLimit"] == runtime.DEFAULT_PIDS_LIMIT
+        assert host_config["Memory"] == limits.memory_mb * 1024 * 1024
+        assert host_config["NanoCpus"] == int(limits.cpus * 1_000_000_000)
+        assert host_config["PidsLimit"] == limits.pids
         assert host_config["CapDrop"] == ["ALL"]
         assert host_config["ReadonlyRootfs"] is True
         assert "no-new-privileges:true" in host_config["SecurityOpt"]
+    finally:
+        runtime.remove(app_id, missing_ok=True)
+
+
+def test_limits_honour_configuration(client, monkeypatch, docker_available):
+    """Caps are configurable, so the Oracle box can run tighter than a laptop."""
+    monkeypatch.setenv("HANGAR_APP_MEMORY_MB", "256")
+    monkeypatch.setenv("HANGAR_APP_PIDS", "64")
+
+    import docker as docker_sdk
+
+    app_id = client.post(
+        "/apps", json={"name": "tight-app", "source_path": str(EXAMPLES / "fastapi-hello")}
+    ).json()["id"]
+    try:
+        assert client.get(f"/apps/{app_id}").json()["status"] == "running"
+        host_config = docker_sdk.from_env().containers.get(
+            f"hangar-{app_id}"
+        ).attrs["HostConfig"]
+
+        assert host_config["Memory"] == 256 * 1024 * 1024
+        assert host_config["PidsLimit"] == 64
+    finally:
+        runtime.remove(app_id, missing_ok=True)
+
+
+def test_sandbox_runtime_is_requested_when_configured(client, monkeypatch):
+    """HANGAR_RUNTIME=runsc is the gVisor switch the PRD's §8 depends on.
+
+    gVisor isn't installed here, so the deploy must fail — but it must fail
+    because Docker rejected an unknown runtime, proving the setting reached it.
+    """
+    monkeypatch.setenv("HANGAR_RUNTIME", "definitely-not-installed")
+
+    app_id = client.post(
+        "/apps",
+        json={"name": "sandboxed-app", "source_path": str(EXAMPLES / "fastapi-hello")},
+    ).json()["id"]
+    try:
+        app = client.get(f"/apps/{app_id}").json()
+        assert app["status"] == "failed"
+        assert "definitely-not-installed" in app["error"]
     finally:
         runtime.remove(app_id, missing_ok=True)

@@ -12,16 +12,14 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator
 from pathlib import Path
 
 import docker
 from docker.errors import BuildError, DockerException
 
+from .backends.base import BuildFailed, BuildResult, LogSink
 from .detect import IGNORED_DIRS, Detection, requirement_name
-
-LogSink = Callable[[str], None]
 
 # Framework packages the start command needs, which an app's own dependency
 # file often omits (a Flask app rarely declares gunicorn, for example).
@@ -30,18 +28,6 @@ RUNTIME_PACKAGES = {
     "flask": ["flask", "gunicorn"],
     "streamlit": ["streamlit"],
 }
-
-
-class BuildFailed(Exception):
-    """Raised when the image could not be built."""
-
-
-@dataclass
-class BuildResult:
-    image_tag: str
-    dockerfile: str
-    log: str
-    used_existing_dockerfile: bool
 
 
 def build(

@@ -18,7 +18,11 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Image builder + Docker deploy engine | working |
 | Control plane API (FastAPI) | working |
 | Ingestion: local folder path | working |
+| Pluggable execution backend | working |
+| Env-driven config, Postgres support | working |
+| API token auth on the control plane | working |
 | Ingestion: zip upload / GitHub repo | not started |
+| Caddy routing / stable per-app hostnames | not started |
 | Static security scan (Semgrep / Bandit / osv-scanner) | not started |
 | Owner dashboard (React + Vite) | not started |
 | Auth + permissions (Ory Kratos) | not started |
@@ -85,14 +89,65 @@ curl http://127.0.0.1:8080/apps/<id>/logs   # build log + container log
 | `POST` | `/apps/{id}/restart` | Restart and re-read the published port |
 | `DELETE` | `/apps/{id}` | Remove the container and forget the app |
 
-The API has **no authentication** — that's PRD Milestone 3. `hangar serve` binds to
-`127.0.0.1` for that reason and warns if you point it elsewhere.
+## Configuration
+
+Everything deployment-varying comes from the environment, so the same image runs
+on a laptop and on a server. `hangar config` prints what's resolved (credentials
+redacted).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` / `HANGAR_DATABASE_URL` | local SQLite | Control-plane database. `postgres://` URLs are normalised automatically |
+| `HANGAR_API_TOKEN` | unset | Shared bearer token for `/apps`. Unset = no auth, loopback only |
+| `HANGAR_BACKEND` | `docker` | Which execution backend runs apps |
+| `HANGAR_RUNTIME` | unset | Container runtime. Set to `runsc` for gVisor |
+| `HANGAR_PUBLIC_BASE_URL` | `http://localhost` | Base for generated app URLs |
+| `HANGAR_APP_MEMORY_MB` | `512` | Per-app memory cap |
+| `HANGAR_APP_CPUS` | `0.5` | Per-app CPU cap |
+| `HANGAR_APP_PIDS` | `256` | Per-app process cap |
+| `PORT` | `8080` | Port to serve on (what most hosts inject) |
+
+For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
+
+### Authentication
+
+Routes under `/apps` require `Authorization: Bearer $HANGAR_API_TOKEN` when that
+variable is set. `/healthz` stays open so uptime pingers and platform probes work
+without credentials.
+
+With no token set the API is unauthenticated, which keeps local development
+setup-free — and `hangar serve` **refuses to bind to a non-loopback interface**
+in that state, so an anonymous control plane can't be exposed by accident.
+
+This guards the control plane's own API. It is *not* the PRD's auth layer:
+per-user identity and owner/editor/viewer permissions via Ory Kratos are still
+Milestone 3.
+
+### Swapping the sandbox
+
+`runtime.py` talks to Docker, but the control plane only knows the
+`ExecutionBackend` interface in `hangar/backends/base.py`. That's the seam for
+the PRD's target architecture, where execution lives on a different box from the
+control plane — a remote-runner backend implements the same methods without
+touching this code.
+
+On a host with gVisor installed, `HANGAR_RUNTIME=runsc` routes app containers
+through it.
 
 ## Development
 
 ```bash
-uv run pytest                  # everything (builds real images, ~20s)
+uv run pytest                  # everything (builds real images, ~25s)
 uv run pytest -m "not slow"    # fast tests only, no Docker needed
+```
+
+The Postgres tests need a throwaway database and are skipped without one:
+
+```bash
+docker run -d --name hangar-test-pg -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=hangar -p 55432:5432 postgres:16-alpine
+HANGAR_TEST_POSTGRES_URL=postgresql://postgres:test@localhost:55432/hangar \
+  uv run pytest tests/test_store_postgres.py
 ```
 
 ## Layout
@@ -101,11 +156,16 @@ uv run pytest -m "not slow"    # fast tests only, no Docker needed
 hangar/
   detect.py      static runtime/framework detection — never executes app code
   builder.py     Dockerfile generation and image builds
-  runtime.py     container lifecycle, resource caps, logs
+  runtime.py     Docker container lifecycle, resource caps, logs
+  backends/
+    base.py      the ExecutionBackend interface — no Docker import
+    docker_backend.py  local Docker implementation
   deploy.py      orchestration: detect -> build -> run, with status transitions
-  store.py       SQLite persistence (App, Deployment)
+  store.py       persistence (App, Deployment) on SQLite or Postgres
+  config.py      environment-driven settings
+  auth.py        shared-token API auth
   api.py         FastAPI control plane
-  cli.py         `hangar serve`
+  cli.py         `hangar serve` / `hangar config`
 tests/           test suite; `slow` marker = needs Docker
 examples/        sample apps used to exercise the pipeline
 ```
