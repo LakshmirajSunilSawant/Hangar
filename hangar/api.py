@@ -10,14 +10,24 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
-from . import backends, config, routing
+from . import backends, config, ingest, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import require_token
 from .backends import BackendError
+from .ingest import IngestError
 from .routing import RoutingError
 from .store import AppStatus
 
@@ -44,8 +54,18 @@ class CreateAppRequest(BaseModel):
         description="Lowercase name, used in the image tag and container name.",
         examples=["team-dashboard"],
     )
-    source_path: str = Field(
+    source_path: str | None = Field(
+        default=None,
         description="Absolute path to the app's source directory on this host.",
+    )
+    repo_url: str | None = Field(
+        default=None,
+        description="GitHub repository — https://github.com/owner/repo or owner/repo.",
+        examples=["https://github.com/owner/repo"],
+    )
+    ref: str | None = Field(
+        default=None,
+        description="Branch, tag, or commit. Defaults to the repo's default branch.",
     )
 
 
@@ -56,7 +76,9 @@ class AppView(BaseModel):
     url: str | None = None
     runtime: str | None = None
     framework: str | None = None
+    source_type: str
     source_ref: str
+    source_revision: str | None = None
     error: str | None = None
     created_at: str
     updated_at: str
@@ -70,7 +92,9 @@ class AppView(BaseModel):
             url=app.url,
             runtime=app.runtime,
             framework=app.framework,
+            source_type=app.source_type,
             source_ref=app.source_ref,
+            source_revision=app.source_revision,
             error=app.error,
             created_at=app.created_at.isoformat(),
             updated_at=app.updated_at.isoformat(),
@@ -124,25 +148,78 @@ def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppVie
     Returns 202 immediately — the build takes far longer than a request should.
     Poll GET /apps/{id} for the outcome.
     """
-    name = request.name.strip().lower()
-    if not NAME_PATTERN.match(name):
+    name = _validate_name(request.name)
+
+    if bool(request.source_path) == bool(request.repo_url):
         raise HTTPException(
-            422,
-            "name must be 3-40 characters of lowercase letters, digits, or hyphens, "
-            "and start and end with a letter or digit",
+            422, "provide exactly one of source_path or repo_url"
         )
 
-    source = Path(request.source_path).expanduser()
-    if not source.is_absolute():
-        raise HTTPException(422, "source_path must be an absolute path")
-    if not source.is_dir():
-        raise HTTPException(422, f"source_path is not a directory: {source}")
+    if request.source_path:
+        source = Path(request.source_path).expanduser()
+        if not source.is_absolute():
+            raise HTTPException(422, "source_path must be an absolute path")
+        if not source.is_dir():
+            raise HTTPException(422, f"source_path is not a directory: {source}")
+        fields = dict(
+            source_type="path",
+            source_ref=str(source.resolve()),
+            source_dir=str(source.resolve()),
+        )
+    else:
+        # Parsed up front so a malformed URL is a 422 now rather than a failed
+        # deploy discovered by polling later.
+        try:
+            repo = ingest.parse_repo(request.repo_url, request.ref)
+        except IngestError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        fields = dict(
+            source_type="repo",
+            source_ref=repo.slug,
+            source_revision=repo.ref,
+        )
 
     with store.session() as sess:
-        if store.app_by_name(sess, name) is not None:
-            raise HTTPException(409, f"an app named '{name}' already exists")
+        _reject_duplicate(sess, name)
+        app = store.App(name=name, **fields)
+        store.save(sess, app)
+        view = AppView.of(app)
 
-        app = store.App(name=name, source_type="path", source_ref=str(source.resolve()))
+    background.add_task(deploy_mod.deploy, view.id)
+    return view
+
+
+@apps.post("/upload", response_model=AppView, status_code=202)
+async def upload_app(
+    background: BackgroundTasks,
+    name: str = Form(description="Lowercase app name."),
+    file: UploadFile = File(description="Zip archive of the app's source."),
+) -> AppView:
+    """Register an app from an uploaded zip and kick off a deploy."""
+    app_name = _validate_name(name)
+
+    with store.session() as sess:
+        _reject_duplicate(sess, app_name)
+
+    data = await file.read()
+
+    # The app id names the extraction directory, so it has to exist before the
+    # archive is unpacked.
+    app_id = store.new_id()
+    try:
+        extracted = ingest.from_zip(data, app_id)
+    except IngestError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    with store.session() as sess:
+        _reject_duplicate(sess, app_name)
+        app = store.App(
+            id=app_id,
+            name=app_name,
+            source_type="zip",
+            source_ref=file.filename or "upload.zip",
+            source_dir=str(extracted),
+        )
         store.save(sess, app)
         view = AppView.of(app)
 
@@ -266,6 +343,10 @@ def delete_app(app_id: str) -> None:
         app = _require(sess, app_id)
         backends.get_backend().remove(app_id, missing_ok=True)
         routing.get_router().remove(app_id, missing_ok=True)
+        # Extracted zip and repo sources are Hangar's to clean up; a
+        # source_path app's directory belongs to the user and is left alone.
+        if app.source_type in ("zip", "repo"):
+            ingest.discard_source(app_id)
         for deployment in store.deployments_for(sess, app_id):
             sess.delete(deployment)
         sess.delete(app)
@@ -282,6 +363,22 @@ def _require(sess, app_id: str) -> store.App:
     if app is None:
         raise HTTPException(404, f"no app with id {app_id}")
     return app
+
+
+def _validate_name(name: str) -> str:
+    cleaned = name.strip().lower()
+    if not NAME_PATTERN.match(cleaned):
+        raise HTTPException(
+            422,
+            "name must be 3-40 characters of lowercase letters, digits, or hyphens, "
+            "and start and end with a letter or digit",
+        )
+    return cleaned
+
+
+def _reject_duplicate(sess, name: str) -> None:
+    if store.app_by_name(sess, name) is not None:
+        raise HTTPException(409, f"an app named '{name}' already exists")
 
 
 def _act(action, app_id: str) -> None:

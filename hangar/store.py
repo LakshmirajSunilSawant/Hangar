@@ -56,8 +56,15 @@ class ScanStatus(str, Enum):
 class App(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     name: str = Field(index=True)
-    source_type: str = "path"  # "path" today; "zip"/"repo" as ingestion grows
-    source_ref: str  # absolute path to the source directory
+    source_type: str = "path"  # "path" | "zip" | "repo"
+    # Where the source came from: an absolute path, an uploaded filename, or a
+    # repository URL. Kept for display and for re-fetching repo-backed apps.
+    source_ref: str
+    # Local directory the build reads. Same as source_ref for "path"; an
+    # extracted directory under HANGAR_SOURCE_ROOT for "zip" and "repo".
+    source_dir: str = ""
+    # Branch, tag, or commit for repo-backed apps.
+    source_revision: str | None = None
     runtime: str | None = None
     framework: str | None = None
     status: str = AppStatus.QUEUED

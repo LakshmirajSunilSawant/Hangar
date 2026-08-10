@@ -12,9 +12,10 @@ import json
 import logging
 from pathlib import Path
 
-from . import backends, config, routing, scan, store
+from . import backends, config, ingest, routing, scan, store
 from .backends import BackendError
 from .detect import DetectionError, detect
+from .ingest import IngestError
 from .routing import RoutingError
 from .store import AppStatus, Deployment, DeploymentStatus, ScanStatus
 
@@ -43,13 +44,14 @@ def deploy(app_id: str) -> None:
         app.error = None
         store.save(sess, app, deployment)
 
-        source = Path(app.source_ref)
         lines: list[str] = []
 
         def record(line: str) -> None:
             lines.append(line)
 
         try:
+            source = _prepare_source(app, record)
+            store.save(sess, app)
             backend = backends.get_backend()
             if not backend.available():
                 raise BackendError(
@@ -109,11 +111,30 @@ def deploy(app_id: str) -> None:
             # deploy, so undo it.
             _discard_container(app.id, lines)
             _fail(sess, app, deployment, lines, str(exc))
-        except (DetectionError, BackendError, ScanBlocked) as exc:
+        except (DetectionError, BackendError, ScanBlocked, IngestError) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread
             log.exception("unexpected failure deploying %s", app_id)
             _fail(sess, app, deployment, lines, f"unexpected error: {exc}")
+
+
+def _prepare_source(app, record) -> Path:
+    """Make the app's source available locally, refreshing it where possible.
+
+    Repo-backed apps re-fetch on every deploy, so "redeploy" means "deploy
+    what's on the branch now" — which is what anyone pressing it expects.
+    Uploaded zips can't be re-fetched, so the extracted copy is reused.
+    """
+    if app.source_type == "repo":
+        record(f"fetching {app.source_ref}")
+        repo = ingest.from_github(app.source_ref, app.id, app.source_revision)
+        record(f"fetched {repo.slug}" + (f" at {repo.ref}" if repo.ref else ""))
+        app.source_dir = str(ingest.source_dir_for(app.id))
+
+    source = Path(app.source_dir or app.source_ref)
+    if not source.is_dir():
+        raise IngestError(f"source directory is missing: {source}")
+    return source
 
 
 def _scan(deployment, source: Path, record) -> None:

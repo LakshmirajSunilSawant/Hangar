@@ -17,14 +17,13 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Runtime detection (Python / Node) | working |
 | Image builder + Docker deploy engine | working |
 | Control plane API (FastAPI) | working |
-| Ingestion: local folder path | working |
+| Ingestion: local path, zip upload, GitHub repo | working |
 | Pluggable execution backend | working |
 | Env-driven config, Postgres support | working |
 | API token auth on the control plane | working |
 | Caddy routing / stable per-app hostnames | working |
 | Static security scan before execution | working |
 | Egress default-deny | working |
-| Ingestion: zip upload / GitHub repo | not started |
 | Owner dashboard (React + Vite) | not started |
 | Auth + permissions (Ory Kratos) | not started |
 | Per-app database provisioning | not started |
@@ -83,10 +82,12 @@ curl http://127.0.0.1:8080/apps/<id>/logs   # build log + container log
 
 | Method | Route | Does |
 |---|---|---|
-| `POST` | `/apps` | Register a source directory and start a deploy |
+| `POST` | `/apps` | Register a source directory or GitHub repo, and deploy |
+| `POST` | `/apps/upload` | Upload a zip of the app's source and deploy |
 | `GET` | `/apps` | List apps |
 | `GET` | `/apps/{id}` | One app: status, URL, detected runtime |
 | `GET` | `/apps/{id}/logs` | Build log and container log |
+| `GET` | `/apps/{id}/scan` | Security findings from the pre-execution scan |
 | `POST` | `/apps/{id}/redeploy` | Rebuild and replace the container |
 | `POST` | `/apps/{id}/stop` | Stop the container |
 | `POST` | `/apps/{id}/restart` | Restart and re-read the published port |
@@ -118,6 +119,8 @@ redacted).
 | `HANGAR_SCAN_BLOCK_SEVERITY` | `high` | Threshold when policy is `block` |
 | `HANGAR_EGRESS` | `allow` | `deny` removes apps' outbound network |
 | `HANGAR_APP_NETWORK` | `hangar-apps` | Internal network used when denying egress |
+| `HANGAR_SOURCE_ROOT` | `.hangar/sources` | Where uploaded and fetched sources are extracted |
+| `HANGAR_GITHUB_TOKEN` | unset | Raises the GitHub rate limit; required for private repos |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -195,6 +198,7 @@ hangar/
   deploy.py      orchestration: detect -> build -> run, with status transitions
   routing.py     per-app hostnames via Caddy's admin API
   scan.py        static security analysis — never executes what it scans
+  ingest.py      zip and GitHub sources, with hostile-archive handling
   store.py       persistence (App, Deployment) on SQLite or Postgres
   config.py      environment-driven settings
   auth.py        shared-token API auth
@@ -245,6 +249,22 @@ curl -H "Authorization: Bearer $HANGAR_API_TOKEN" \
 `HANGAR_SCAN_POLICY=flag` (default, per PRD v1) records findings and continues;
 `block` refuses any deploy with a finding at or above
 `HANGAR_SCAN_BLOCK_SEVERITY`; `off` skips it.
+
+### Uploaded and fetched sources
+
+Archives are the most hostile input the platform takes, and extraction happens
+on the **control-plane host, before any sandbox exists** — so a path-traversal
+bug there writes to the host as the Hangar process.
+
+Extraction therefore does not use `extractall`. Every entry's resolved
+destination must stay inside the target directory; symlinks, hardlinks and
+device nodes are dropped (a symlink is a traversal primitive that survives the
+path check); and total expanded size and entry count are capped so a small
+archive can't become a disk-filling one.
+
+GitHub is read through the REST API's tarball endpoint rather than by shelling
+out to `git`, so no git binary is needed on the host. Set `HANGAR_GITHUB_TOKEN`
+for private repos or to raise the rate limit.
 
 ### Egress deny
 

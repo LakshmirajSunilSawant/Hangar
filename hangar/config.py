@@ -45,6 +45,8 @@ class Settings:
     scan_block_severity: str
     egress: str
     app_network: str
+    source_root: str
+    github_token: str | None
 
     @property
     def auth_enabled(self) -> bool:
@@ -130,6 +132,10 @@ def settings() -> Settings:
         # the same network — see Settings.validate().
         egress=_choice("HANGAR_EGRESS", "allow", ("allow", "deny")),
         app_network=os.environ.get("HANGAR_APP_NETWORK", "hangar-apps"),
+        source_root=os.environ.get(
+            "HANGAR_SOURCE_ROOT", str(Path.cwd() / ".hangar" / "sources")
+        ),
+        github_token=_str("HANGAR_GITHUB_TOKEN"),
     )
 
 
