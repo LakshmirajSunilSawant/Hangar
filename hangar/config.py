@@ -54,6 +54,7 @@ class Settings:
     session_hours: int
     require_app_auth: bool
     control_plane_address: str
+    cookie_domain: str | None
 
     @property
     def auth_enabled(self) -> bool:
@@ -74,6 +75,19 @@ class Settings:
                 "HANGAR_APP_AUTH=1 gates apps behind the platform's login, "
                 "which requires a proxy in front of them. Set "
                 "HANGAR_ROUTER=caddy, or turn app auth off."
+            )
+        if self.require_app_auth and not self.cookie_domain:
+            # Without this the session cookie is host-only, so a browser signed
+            # in at the control plane never sends it to an app's hostname and
+            # every visit is refused — while the API, which passes the cookie
+            # explicitly, appears to work fine.
+            raise ValueError(
+                "HANGAR_APP_AUTH=1 needs HANGAR_COOKIE_DOMAIN so the session "
+                f"reaches apps on other hostnames — set it to '.{self.app_domain}' "
+                "(the leading dot covers every subdomain)."
+                if self.app_domain
+                else "HANGAR_APP_AUTH=1 needs HANGAR_COOKIE_DOMAIN and "
+                "HANGAR_APP_DOMAIN."
             )
         if self.egress_denied and self.router == "none":
             raise ValueError(
@@ -167,6 +181,9 @@ def settings() -> Settings:
         control_plane_address=os.environ.get(
             "HANGAR_CONTROL_PLANE_ADDRESS", f"127.0.0.1:{DEFAULT_PORT}"
         ),
+        # Scopes the session cookie across subdomains. Unset means host-only,
+        # which is correct until apps live on sibling hostnames.
+        cookie_domain=_str("HANGAR_COOKIE_DOMAIN"),
     )
 
 

@@ -342,3 +342,66 @@ def test_only_admins_may_manage_users(client, admin):
 
     assert client.get("/users").status_code == 403
     assert client.post("/users", json={"email": "x@example.com"}).status_code == 403
+
+
+# --------------------------------------------------------------------------
+# Cookie scope — the difference between working in curl and working in a browser
+# --------------------------------------------------------------------------
+
+
+def test_session_cookie_is_host_only_by_default(client, admin):
+    make_user(client, admin, "person@example.com")
+    response = client.post(
+        "/auth/login", json={"email": "person@example.com", "password": PASSWORD}
+    )
+    assert "domain=" not in response.headers["set-cookie"].lower()
+
+
+def test_session_cookie_can_span_subdomains(client, admin, monkeypatch):
+    """Apps live at <name>.<app domain>, so the session has to reach them.
+
+    Without this the browser holds a cookie scoped to the control plane's own
+    hostname, never sends it to an app, and every visit is refused — while an
+    API client passing the cookie by hand sees nothing wrong.
+    """
+    monkeypatch.setenv("HANGAR_COOKIE_DOMAIN", ".example.com")
+    make_user(client, admin, "person@example.com")
+
+    response = client.post(
+        "/auth/login", json={"email": "person@example.com", "password": PASSWORD}
+    )
+    assert "domain=.example.com" in response.headers["set-cookie"].lower()
+
+
+def test_logout_clears_the_cookie_on_the_same_domain(client, admin, monkeypatch):
+    """A mismatched domain leaves the old cookie in place and logout does nothing."""
+    monkeypatch.setenv("HANGAR_COOKIE_DOMAIN", ".example.com")
+    make_user(client, admin, "person@example.com")
+    sign_in(client, "person@example.com")
+
+    response = client.post("/auth/logout")
+    assert "domain=.example.com" in response.headers["set-cookie"].lower()
+
+
+def test_app_auth_without_a_cookie_domain_is_refused(monkeypatch):
+    """Fail at startup rather than silently refusing every visitor."""
+    from hangar import config
+
+    monkeypatch.setenv("HANGAR_APP_AUTH", "1")
+    monkeypatch.setenv("HANGAR_ROUTER", "caddy")
+    monkeypatch.setenv("HANGAR_APP_DOMAIN", "apps.example.com")
+    monkeypatch.delenv("HANGAR_COOKIE_DOMAIN", raising=False)
+
+    with pytest.raises(ValueError, match="HANGAR_COOKIE_DOMAIN"):
+        config.settings().validate()
+
+
+def test_app_auth_with_a_cookie_domain_is_accepted(monkeypatch):
+    from hangar import config
+
+    monkeypatch.setenv("HANGAR_APP_AUTH", "1")
+    monkeypatch.setenv("HANGAR_ROUTER", "caddy")
+    monkeypatch.setenv("HANGAR_APP_DOMAIN", "apps.example.com")
+    monkeypatch.setenv("HANGAR_COOKIE_DOMAIN", ".apps.example.com")
+
+    config.settings().validate()

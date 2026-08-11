@@ -112,6 +112,9 @@ def _set_cookie(request: Request, response: Response, token: str) -> None:
         samesite="lax",
         secure=scheme == "https",
         path="/",
+        # Scoped to the parent domain when apps live on sibling hostnames,
+        # or the browser never sends the session to them.
+        domain=settings.cookie_domain,
     )
 
 
@@ -141,7 +144,10 @@ def logout(request: Request, response: Response) -> None:
     if token:
         with store.session() as sess:
             identity.end_session(sess, token)
-    response.delete_cookie(identity.SESSION_COOKIE, path="/")
+    # Same domain as when it was set, or the browser keeps the old cookie.
+    response.delete_cookie(
+        identity.SESSION_COOKIE, path="/", domain=config.settings().cookie_domain
+    )
 
 
 @auth_router.post("/accept-invite", response_model=WhoAmI)

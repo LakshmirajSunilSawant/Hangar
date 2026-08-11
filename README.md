@@ -152,6 +152,7 @@ redacted).
 | `HANGAR_IDENTITY` | `local` | Identity provider |
 | `HANGAR_SESSION_HOURS` | `336` | Session lifetime |
 | `HANGAR_APP_AUTH` | `0` | `1` requires sign-in before reaching any app |
+| `HANGAR_COOKIE_DOMAIN` | unset | Scopes the session across subdomains; required with app auth |
 | `HANGAR_CONTROL_PLANE_ADDRESS` | `127.0.0.1:8080` | Where the proxy reaches Hangar for forward-auth |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
