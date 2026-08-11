@@ -12,6 +12,9 @@ dependencies = [
     "docker>=7.1",
     "pydantic>=2.9",
     "requests>=2.32",
+    # libsodium bindings — the PRD's stated choice for encrypting secrets at
+    # rest (§6, secrets management row).
+    "pynacl>=1.5",
 ]
 
 [project.optional-dependencies]

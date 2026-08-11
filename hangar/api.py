@@ -7,6 +7,7 @@ owner/editor/viewer permissions are still Milestone 3.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
@@ -24,11 +25,12 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backends, config, ingest, routing
+from . import backends, config, database, ingest, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import require_token
 from .backends import BackendError
+from .database import DatabaseError
 from .ingest import IngestError
 from .routing import RoutingError
 from .store import AppStatus
@@ -42,6 +44,8 @@ api = FastAPI(
 # Everything under /apps is authenticated. /healthz stays open so a platform
 # health check or uptime pinger doesn't need the token.
 apps = APIRouter(prefix="/apps", tags=["apps"], dependencies=[Depends(require_token)])
+
+log = logging.getLogger("hangar.api")
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
 
@@ -69,6 +73,11 @@ class CreateAppRequest(BaseModel):
         default=None,
         description="Branch, tag, or commit. Defaults to the repo's default branch.",
     )
+    database: str | None = Field(
+        default=None,
+        description="Per-app database: none, sqlite, or postgres. Defaults to HANGAR_APP_DB.",
+        examples=["sqlite"],
+    )
 
 
 class AppView(BaseModel):
@@ -81,6 +90,7 @@ class AppView(BaseModel):
     source_type: str
     source_ref: str
     source_revision: str | None = None
+    database: str | None = None
     error: str | None = None
     created_at: str
     updated_at: str
@@ -97,6 +107,7 @@ class AppView(BaseModel):
             source_type=app.source_type,
             source_ref=app.source_ref,
             source_revision=app.source_revision,
+            database=app.db_type,
             error=app.error,
             created_at=app.created_at.isoformat(),
             updated_at=app.updated_at.isoformat(),
@@ -157,6 +168,8 @@ def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppVie
             422, "provide exactly one of source_path or repo_url"
         )
 
+    db_type = _validate_database(request.database)
+
     if request.source_path:
         source = Path(request.source_path).expanduser()
         if not source.is_absolute():
@@ -183,7 +196,7 @@ def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppVie
 
     with store.session() as sess:
         _reject_duplicate(sess, name)
-        app = store.App(name=name, **fields)
+        app = store.App(name=name, db_type=db_type, **fields)
         store.save(sess, app)
         view = AppView.of(app)
 
@@ -196,9 +209,14 @@ async def upload_app(
     background: BackgroundTasks,
     name: str = Form(description="Lowercase app name."),
     file: UploadFile = File(description="Zip archive of the app's source."),
+    # Aliased so the wire name stays "database" without shadowing the module.
+    db_choice: str | None = Form(
+        default=None, alias="database", description="none, sqlite, or postgres."
+    ),
 ) -> AppView:
     """Register an app from an uploaded zip and kick off a deploy."""
     app_name = _validate_name(name)
+    db_type = _validate_database(db_choice)
 
     with store.session() as sess:
         _reject_duplicate(sess, app_name)
@@ -221,6 +239,7 @@ async def upload_app(
             source_type="zip",
             source_ref=file.filename or "upload.zip",
             source_dir=str(extracted),
+            db_type=db_type,
         )
         store.save(sess, app)
         view = AppView.of(app)
@@ -340,11 +359,27 @@ def restart_app(app_id: str) -> AppView:
 
 
 @apps.delete("/{app_id}", status_code=204)
-def delete_app(app_id: str) -> None:
+def delete_app(app_id: str, keep_data: bool = False) -> None:
+    """Remove the app.
+
+    Its database goes with it unless `keep_data=true`, since storage scoped to
+    a deleted app helps nobody and would accumulate silently. That is
+    irreversible, so it is worth saying plainly rather than burying.
+    """
     with store.session() as sess:
         app = _require(sess, app_id)
         backends.get_backend().remove(app_id, missing_ok=True)
         routing.get_router().remove(app_id, missing_ok=True)
+
+        if not keep_data:
+            try:
+                database.deprovision(sess, app_id)
+                backends.get_backend().remove_data(app_id)
+            except (DatabaseError, BackendError) as exc:
+                # The app is going away regardless; a stuck volume shouldn't
+                # leave an undeletable record behind.
+                log.warning("could not remove data for %s: %s", app_id, exc)
+
         # Extracted zip and repo sources are Hangar's to clean up; a
         # source_path app's directory belongs to the user and is left alone.
         if app.source_type in ("zip", "repo"):
@@ -376,6 +411,17 @@ def _validate_name(name: str) -> str:
             "and start and end with a letter or digit",
         )
     return cleaned
+
+
+def _validate_database(choice: str | None) -> str | None:
+    """None means "whatever the server is configured to default to"."""
+    if choice is None:
+        return None
+    if choice not in ("none", "sqlite", "postgres"):
+        raise HTTPException(
+            422, "database must be one of: none, sqlite, postgres"
+        )
+    return choice
 
 
 def _reject_duplicate(sess, name: str) -> None:

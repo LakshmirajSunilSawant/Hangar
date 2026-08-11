@@ -105,8 +105,14 @@ class ExecutionBackend(ABC):
         *,
         env: dict[str, str] | None = None,
         limits: ResourceLimits | None = None,
+        volumes: dict[str, dict] | None = None,
     ) -> RunningApp:
-        ...
+        """Start the app.
+
+        ``volumes`` maps a backend-specific volume name to a mount spec. It is
+        how an app persists anything at all, since the root filesystem is
+        read-only.
+        """
 
     @abstractmethod
     def status(self, app_id: str) -> str:
@@ -131,3 +137,11 @@ class ExecutionBackend(ABC):
     @abstractmethod
     def host_port(self, app_id: str) -> int | None:
         """Published port, re-read from the backend rather than from the store."""
+
+    def remove_data(self, app_id: str) -> bool:
+        """Destroy the app's persistent storage. Irreversible.
+
+        Not abstract: a backend with no notion of volumes is entitled to do
+        nothing here, and should not be forced to implement a no-op.
+        """
+        return False

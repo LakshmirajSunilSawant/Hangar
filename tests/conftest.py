@@ -77,6 +77,10 @@ class FakeState:
         self.port: int | None = None
         self.runtime_log: str = ""
         self.is_available: bool = True
+        # What the deploy pipeline last handed the backend.
+        self.last_env: dict[str, str] = {}
+        self.last_volumes: dict[str, dict] = {}
+        self.removed_data: list[str] = []
 
     def record(self, method: str, app_id: str) -> None:
         self.calls.append((method, app_id))
@@ -102,8 +106,20 @@ class FakeBackend(ExecutionBackend):
             image_tag=tag, dockerfile="", log="", used_existing_dockerfile=False
         )
 
-    def run(self, image_tag, app_id, app_name, container_port, *, env=None, limits=None):
+    def run(
+        self,
+        image_tag,
+        app_id,
+        app_name,
+        container_port,
+        *,
+        env=None,
+        limits=None,
+        volumes=None,
+    ):
         FAKE.record("run", app_id)
+        FAKE.last_env = dict(env or {})
+        FAKE.last_volumes = dict(volumes or {})
         port = FAKE.port or 12345
         return RunningApp(
             container_id="fake",
@@ -134,6 +150,11 @@ class FakeBackend(ExecutionBackend):
     def host_port(self, app_id: str) -> int | None:
         FAKE.record("host_port", app_id)
         return FAKE.port
+
+    def remove_data(self, app_id: str) -> bool:
+        FAKE.record("remove_data", app_id)
+        FAKE.removed_data.append(app_id)
+        return True
 
 
 @pytest.fixture

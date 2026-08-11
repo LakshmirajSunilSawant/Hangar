@@ -26,7 +26,8 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Egress default-deny | working |
 | Owner dashboard (React + Vite) | working |
 | Auth + permissions (Ory Kratos) | not started |
-| Per-app database provisioning | not started |
+| Per-app databases (SQLite or Postgres) | working |
+| CI (GitHub Actions) | working |
 
 Measured locally (x86, WSL2, warm base image layers):
 
@@ -125,6 +126,9 @@ redacted).
 | `HANGAR_APP_NETWORK` | `hangar-apps` | Internal network used when denying egress |
 | `HANGAR_SOURCE_ROOT` | `.hangar/sources` | Where uploaded and fetched sources are extracted |
 | `HANGAR_GITHUB_TOKEN` | unset | Raises the GitHub rate limit; required for private repos |
+| `HANGAR_APP_DB` | `none` | Default per-app database: `none`, `sqlite`, `postgres` |
+| `HANGAR_APP_DB_ADMIN_URL` | unset | Postgres Hangar may create databases/roles on |
+| `HANGAR_SECRET_KEY` | unset | Seals stored secrets. Generate with `hangar gen-key` |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -204,6 +208,8 @@ hangar/
   routing.py     per-app hostnames via Caddy's admin API
   scan.py        static security analysis — never executes what it scans
   ingest.py      zip and GitHub sources, with hostile-archive handling
+  database.py    per-app SQLite volumes and Postgres databases
+  secrets.py     libsodium sealing for stored credentials
   store.py       persistence (App, Deployment) on SQLite or Postgres
   config.py      environment-driven settings
   auth.py        shared-token API auth
@@ -255,6 +261,30 @@ curl -H "Authorization: Bearer $HANGAR_API_TOKEN" \
 `HANGAR_SCAN_POLICY=flag` (default, per PRD v1) records findings and continues;
 `block` refuses any deploy with a finding at or above
 `HANGAR_SCAN_BLOCK_SEVERITY`; `off` skips it.
+
+### Per-app databases
+
+Apps run on a read-only root filesystem, so without this they can persist
+nothing at all — `/tmp` is the only writable path and it is ephemeral.
+
+```bash
+curl -X POST /apps -d '{"name":"notes","repo_url":"owner/repo","database":"sqlite"}'
+```
+
+`DATABASE_URL` is injected into the container. Two modes:
+
+- **sqlite** — a Docker volume mounted at `/data`. No server, no credentials,
+  no network; keeps working when egress is denied. The right default for a
+  small internal tool.
+- **postgres** — a dedicated database *and* role, not a shared schema, so one
+  app cannot read another's tables even if it goes looking. Needs
+  `HANGAR_APP_DB_ADMIN_URL` and `HANGAR_SECRET_KEY`.
+
+Generated Postgres passwords are sealed with libsodium before they touch the
+control-plane database, per PRD §8. `HANGAR_SECRET_KEY` is never auto-generated
+— a key that changed on restart would silently orphan every stored secret.
+
+Deleting an app destroys its database unless you pass `?keep_data=true`.
 
 ### Uploaded and fetched sources
 

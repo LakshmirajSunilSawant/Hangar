@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # GitHub's Linux runners ship a working Docker daemon, so the `slow` tests
+    # that build real images and start real containers run here too. Those are
+    # the ones that have actually caught bugs, so skipping them would leave CI
+    # green on exactly the failures that matter.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hangar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      HANGAR_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/hangar
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install
+        run: uv pip install --system -e ".[dev,postgres]"
+
+      - name: Check Docker is usable
+        # The slow tests skip themselves when Docker is unreachable, so without
+        # this CI could pass while testing none of the container behaviour.
+        run: docker version
+
+      - name: Run tests
+        run: pytest -q --durations=10
+
+  dashboard:
+    name: Dashboard build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: npm ci
+
+      # `npm run build` runs `tsc --noEmit` first, so this covers types too.
+      - run: npm run build
+
+  security:
+    name: Security scan (self-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - run: uv pip install --system -e ".[dev]" bandit semgrep
+
+      # Hangar scans other people's code; it should survive its own scanner.
+      - name: Run Hangar's scanner over Hangar
+        run: |
+          python -c "
+          from hangar import scan
+          result = scan.scan('hangar')
+          print(result.summary())
+          for f in result.findings:
+              print(f'  [{f.severity}] {f.file}:{f.line} {f.rule} — {f.message}')
+          "
+
+      - name: Bandit
+        run: bandit -r hangar -q || true

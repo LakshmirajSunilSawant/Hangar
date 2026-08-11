@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--reload", action="store_true")
 
     sub.add_parser("config", help="show resolved configuration")
+    sub.add_parser("gen-key", help="generate a HANGAR_SECRET_KEY")
 
     args = parser.parse_args(argv)
 
@@ -30,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
         return _serve(args)
     if args.command == "config":
         return _show_config()
+    if args.command == "gen-key":
+        return _gen_key()
 
     parser.print_help()
     return 1
@@ -45,6 +48,18 @@ def config_default_port() -> int:
     return int(raw) if raw.isdigit() else config.DEFAULT_PORT
 
 
+def _gen_key() -> int:
+    from . import secrets
+
+    print(secrets.generate_key())
+    print(
+        "\nSet this as HANGAR_SECRET_KEY and keep it somewhere durable.\n"
+        "If it changes, secrets encrypted with the old key cannot be read back.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _show_config() -> int:
     from . import backends, config, routing
 
@@ -58,6 +73,8 @@ def _show_config() -> int:
     print(f"router           {settings.router} (available: {router.available()})")
     print(f"app_domain       {settings.app_domain or 'unset — apps get host:port URLs'}")
     print(f"auth             {'enabled' if settings.auth_enabled else 'DISABLED'}")
+    print(f"app databases    {settings.app_db}")
+    print(f"secret key       {'set' if settings.secret_key else 'not set'}")
     print(f"sandbox_runtime  {settings.sandbox_runtime or 'docker default (not gVisor)'}")
     print(f"public_base_url  {settings.public_base_url}")
     print(

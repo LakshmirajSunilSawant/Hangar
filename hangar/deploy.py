@@ -12,8 +12,9 @@ import json
 import logging
 from pathlib import Path
 
-from . import backends, config, ingest, routing, scan, store
+from . import backends, config, database, ingest, routing, scan, store
 from .backends import BackendError
+from .database import DatabaseError
 from .detect import DetectionError, detect
 from .ingest import IngestError
 from .routing import RoutingError
@@ -76,11 +77,19 @@ def deploy(app_id: str) -> None:
 
             result = backend.build(source, detection, image_tag(app), on_log=record)
 
+            # Provisioned after the build so a failing build doesn't create
+            # storage, but before the run so DATABASE_URL exists at startup.
+            provisioned = database.provision(sess, app)
+            if provisioned.kind != "none":
+                record(f"attached {provisioned.kind} database ({provisioned.connection_ref})")
+
             running = backend.run(
                 result.image_tag,
                 app_id=app.id,
                 app_name=app.name,
                 container_port=detection.port,
+                env=provisioned.env,
+                volumes=provisioned.volumes,
             )
 
             # Publishing the route is what makes the app shareable; without a
@@ -111,7 +120,13 @@ def deploy(app_id: str) -> None:
             # deploy, so undo it.
             _discard_container(app.id, lines)
             _fail(sess, app, deployment, lines, str(exc))
-        except (DetectionError, BackendError, ScanBlocked, IngestError) as exc:
+        except (
+            DetectionError,
+            BackendError,
+            ScanBlocked,
+            IngestError,
+            DatabaseError,
+        ) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread
             log.exception("unexpected failure deploying %s", app_id)

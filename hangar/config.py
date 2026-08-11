@@ -47,6 +47,9 @@ class Settings:
     app_network: str
     source_root: str
     github_token: str | None
+    app_db: str
+    app_db_admin_url: str | None
+    secret_key: str | None
 
     @property
     def auth_enabled(self) -> bool:
@@ -136,7 +139,17 @@ def settings() -> Settings:
             "HANGAR_SOURCE_ROOT", str(Path.cwd() / ".hangar" / "sources")
         ),
         github_token=_str("HANGAR_GITHUB_TOKEN"),
+        # Default per-app database when a request doesn't ask for one.
+        app_db=_choice("HANGAR_APP_DB", "none", ("none", "sqlite", "postgres")),
+        # An admin connection Hangar can create databases and roles with. Only
+        # needed for the postgres mode.
+        app_db_admin_url=_normalise_optional(_str("HANGAR_APP_DB_ADMIN_URL")),
+        secret_key=_str("HANGAR_SECRET_KEY"),
     )
+
+
+def _normalise_optional(url: str | None) -> str | None:
+    return normalise_database_url(url) if url else None
 
 
 def database_url() -> str:

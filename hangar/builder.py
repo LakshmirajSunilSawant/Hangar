@@ -19,6 +19,7 @@ import docker
 from docker.errors import BuildError, DockerException
 
 from .backends.base import BuildFailed, BuildResult, LogSink
+from .database import DATA_MOUNT
 from .detect import IGNORED_DIRS, Detection, requirement_name
 
 # Framework packages the start command needs, which an app's own dependency
@@ -174,8 +175,15 @@ def _common_tail(d: Detection, home: str) -> list[str]:
         # Untrusted code must not run as root inside the container. This is a
         # defence-in-depth measure, not the isolation boundary itself — see the
         # sandbox note in README.
+        #
+        # /data is created here, owned by the app user, even when no database
+        # is attached. Docker seeds a fresh named volume from the image's
+        # directory at the mount point, so this is what makes the volume
+        # writable by a non-root process; without it the app gets a root-owned
+        # mount it cannot write to.
         "RUN useradd --create-home --uid 10001 hangar \\",
-        f"    && chown -R hangar:hangar {home}",
+        f"    && mkdir -p {DATA_MOUNT} \\",
+        f"    && chown -R hangar:hangar {home} {DATA_MOUNT}",
         "USER hangar",
         "",
         f"ENV PORT={d.port}",

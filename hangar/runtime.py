@@ -55,6 +55,7 @@ def run(
     *,
     env: dict[str, str] | None = None,
     limits: ResourceLimits | None = None,
+    volumes: dict[str, dict] | None = None,
     host_port: int | None = None,
     docker_client: docker.DockerClient | None = None,
 ) -> RunningApp:
@@ -98,6 +99,11 @@ def run(
         "tmpfs": {"/tmp": "rw,noexec,nosuid,size=64m"},
         "restart_policy": {"Name": "unless-stopped"},
     }
+
+    if volumes:
+        # Named volumes mount over the read-only root, so this is the only way
+        # an app can write anything that outlives its container.
+        kwargs["volumes"] = volumes
 
     if settings.sandbox_runtime:
         kwargs["runtime"] = settings.sandbox_runtime
@@ -210,6 +216,22 @@ def remove(
         return
     except APIError as exc:
         raise DeployError(f"could not remove container: {exc}") from exc
+
+
+def remove_volume(
+    app_id: str, *, docker_client: docker.DockerClient | None = None
+) -> bool:
+    """Destroy an app's data volume. Irreversible; returns whether one existed."""
+    from .database import volume_name
+
+    dc = docker_client or client()
+    try:
+        dc.volumes.get(volume_name(app_id)).remove(force=True)
+        return True
+    except NotFound:
+        return False
+    except APIError as exc:
+        raise DeployError(f"could not remove data volume: {exc}") from exc
 
 
 def host_port(app_id: str, *, docker_client: docker.DockerClient | None = None) -> int | None:

@@ -53,6 +53,7 @@ class DockerBackend(ExecutionBackend):
         *,
         env: dict[str, str] | None = None,
         limits: ResourceLimits | None = None,
+        volumes: dict[str, dict] | None = None,
     ) -> RunningApp:
         return runtime.run(
             image_tag,
@@ -61,6 +62,7 @@ class DockerBackend(ExecutionBackend):
             container_port=container_port,
             env=env,
             limits=limits,
+            volumes=volumes,
         )
 
     def status(self, app_id: str) -> str:
@@ -80,6 +82,9 @@ class DockerBackend(ExecutionBackend):
 
     def host_port(self, app_id: str) -> int | None:
         return runtime.host_port(app_id)
+
+    def remove_data(self, app_id: str) -> bool:
+        return runtime.remove_volume(app_id)
 
 
 __all__ = ["DockerBackend", "DeployError"]

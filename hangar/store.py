@@ -73,9 +73,24 @@ class App(SQLModel, table=True):
     # Dial address the router uses. Stored because with egress denied there is
     # no host port to recompute it from on restart.
     upstream: str | None = None
+    # "none" | "sqlite" | "postgres". Null means "use the server default".
+    db_type: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AppDatabase(SQLModel, table=True):
+    """Storage scoped to one app (PRD §7)."""
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    app_id: str = Field(index=True, foreign_key="app.id")
+    db_type: str  # "sqlite" | "postgres"
+    # Volume name or database name. Never a password.
+    connection_ref: str
+    # Sealed with libsodium; empty for sqlite, which has no credentials.
+    secret: str = ""
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Deployment(SQLModel, table=True):
