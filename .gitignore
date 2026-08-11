@@ -8,6 +8,9 @@ dist/
 build/
 .pytest_cache/
 
+# Secrets — .env.example is the template, .env never gets committed
+.env
+
 # Hangar local state
 .hangar/
 *.db

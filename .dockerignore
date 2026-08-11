@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.hangar
+*.db
+*.sqlite3
+node_modules
+dashboard/dist
+tests
+examples
+docs
+uv.lock

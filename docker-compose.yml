@@ -1,0 +1,99 @@
+# The whole stack: control plane, database, and the proxy in front of apps.
+#
+#   cp .env.example .env      # then fill in the generated secrets
+#   docker compose up -d
+#
+# Deployed apps are *not* described here — Hangar creates those containers
+# itself, on the `hangar-apps` network declared at the bottom.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hangar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: hangar
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Bound to loopback, not published broadly: without the 127.0.0.1 prefix
+    # Docker publishes to every interface and bypasses the host firewall.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hangar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  hangar:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://hangar:${POSTGRES_PASSWORD}@postgres:5432/hangar
+      HANGAR_API_TOKEN: ${HANGAR_API_TOKEN:?set HANGAR_API_TOKEN in .env}
+      HANGAR_SECRET_KEY: ${HANGAR_SECRET_KEY:?set HANGAR_SECRET_KEY in .env}
+
+      HANGAR_ROUTER: caddy
+      HANGAR_CADDY_ADMIN_URL: http://caddy:2019
+      HANGAR_APP_DOMAIN: ${HANGAR_APP_DOMAIN:?set HANGAR_APP_DOMAIN in .env}
+      HANGAR_APP_SCHEME: ${HANGAR_APP_SCHEME:-https}
+
+      # Apps sit on an internal network with no route out, so Caddy reaches
+      # them by container name and no host port is published.
+      HANGAR_EGRESS: ${HANGAR_EGRESS:-deny}
+      HANGAR_APP_NETWORK: hangar-apps
+      HANGAR_APP_AUTH: ${HANGAR_APP_AUTH:-0}
+      HANGAR_CONTROL_PLANE_ADDRESS: hangar:8080
+
+      HANGAR_APP_DB: ${HANGAR_APP_DB:-sqlite}
+      HANGAR_APP_DB_ADMIN_URL: postgresql://hangar:${POSTGRES_PASSWORD}@postgres:5432/hangar
+      HANGAR_SCAN_POLICY: ${HANGAR_SCAN_POLICY:-flag}
+      # Set to runsc once gVisor is installed on the host. Until then app code
+      # shares the host kernel.
+      HANGAR_RUNTIME: ${HANGAR_RUNTIME:-}
+      HANGAR_SOURCE_ROOT: /var/lib/hangar/sources
+    volumes:
+      # Root-equivalent. This is how Hangar creates sandboxes; there is no
+      # lesser permission that does the job, which is why the control plane is
+      # kept off the app network and behind the proxy.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - hangar-sources:/var/lib/hangar/sources
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      # The admin API listens on loopback by default, which would make it
+      # unreachable from the control plane's container.
+      CADDY_ADMIN: 0.0.0.0:2019
+    volumes:
+      - caddy-data:/data     # certificates — losing this re-issues them
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      # Both: the outside world for ingress, and the internal app network so
+      # it can reach apps that have no route to anywhere else.
+      - default
+      - hangar-apps
+
+volumes:
+  postgres-data:
+  hangar-sources:
+  caddy-data:
+  caddy-config:
+
+networks:
+  hangar-apps:
+    name: hangar-apps
+    # `internal` is what denies apps egress. Hangar checks this and refuses to
+    # run if the network exists but is not internal, rather than reporting
+    # egress as denied while it is wide open.
+    internal: true

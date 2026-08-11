@@ -67,6 +67,10 @@ def caddy(request):
         # which would make it unreachable from the test process.
         environment={"CADDY_ADMIN": "0.0.0.0:2019"},
         ports={"2019/tcp": admin_port, "80/tcp": http_port},
+        # Docker Desktop provides host.docker.internal automatically; plain
+        # Linux Docker (CI) does not, and without this the proxy cannot reach
+        # the app ports published on the host.
+        extra_hosts={"host.docker.internal": "host-gateway"},
     )
 
     admin_url = f"http://localhost:{admin_port}"

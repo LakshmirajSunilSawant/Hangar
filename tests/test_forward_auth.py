@@ -116,8 +116,11 @@ def control_plane(db, tmp_path, monkeypatch):
     from hangar.api import api
 
     port = free_port()
+    # 0.0.0.0, not loopback: on Linux the proxy container reaches the host
+    # through the docker bridge gateway, and a server bound to 127.0.0.1 will
+    # not accept that connection. Docker Desktop hides this difference.
     server = uvicorn.Server(
-        uvicorn.Config(api, host="127.0.0.1", port=port, log_level="warning")
+        uvicorn.Config(api, host="0.0.0.0", port=port, log_level="warning")
     )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
