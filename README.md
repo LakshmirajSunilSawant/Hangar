@@ -33,14 +33,21 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Backups (restic) | working |
 | `hangar deploy` CLI | working |
 
-Measured locally (x86, WSL2, warm base image layers):
+Measured on x86 (WSL2, warm base image layers):
 
-| Sample app | Build | Cold start → HTTP 200 |
-|---|---|---|
-| `examples/fastapi-hello` | 20.0s | 1.70s |
-| `examples/express-hello` | 17.1s | 0.78s |
+| Sample app | Runtime | Build | Cold start → HTTP 200 |
+|---|---|---|---|
+| `examples/fastapi-hello` | plain Docker | 20.0s | 1.70s |
+| `examples/express-hello` | plain Docker | 17.1s | 0.78s |
+| `examples/fastapi-hello` | **gVisor (`runsc`)** | 19.1s | **2.34s** |
 
-Both are inside the PRD's <3s cold-start target, but this is *not* the Milestone 1 go/no-go answer — that needs Ampere ARM hardware running gVisor, not a Windows dev box running plain Docker.
+The gVisor number is the interesting one: a real sandbox, kernel `4.19.0-gvisor`,
+still inside the PRD's <3s target. Sandboxing cost about 0.6s.
+
+**This is still not the Milestone 1 answer.** It is x86 rather than Ampere ARM,
+WSL2 rather than bare metal, and "cold start" here means stopping and restarting
+an existing container — Hangar has no scale-to-zero, so the idle-app-reopened
+case the PRD actually targets does not exist yet. Evidence, not a verdict.
 
 ### A note on the sandbox
 

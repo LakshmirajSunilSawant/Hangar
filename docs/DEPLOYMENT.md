@@ -19,6 +19,9 @@ Verify every free-tier limit as you go. Oracle changed theirs once already in
 credit, then $1–5/month), which breaks the $0 rule outright. Render's free tier
 is genuine but cannot run Docker. Oracle Always Free can, and doesn't expire.
 
+**On a Windows machine:** it works, with a caveat and a workaround — see
+[Running on Windows](#appendix-running-on-windows-via-wsl2) at the end.
+
 ---
 
 ## 1. Claim the VM
@@ -268,3 +271,52 @@ cd Hangar && git pull && docker compose up -d --build
 
 Deployed apps keep running through a control-plane restart — they are separate
 containers, and Hangar reattaches to them by name.
+
+---
+
+## Appendix: running on Windows via WSL2
+
+A Windows machine can host Hangar with a **real gVisor sandbox** — but not
+through Docker Desktop.
+
+**Docker Desktop will not work for this.** Its Linux VM is a sealed appliance;
+`runsc` cannot be installed into it persistently, so `/healthz` reports
+`docker-default` and app code shares the host kernel. Docker Desktop also only
+starts at login, so nothing comes back after a Windows Update reboot until
+someone signs in.
+
+**A WSL2 distro with native Docker Engine does work.** Verified on Windows 11
+with WSL 2.6.1 (kernel 6.6.87):
+
+```powershell
+wsl --install -d Ubuntu-24.04 --no-launch
+```
+
+```bash
+# inside the distro, as root
+curl -fsSL https://get.docker.com | sh
+
+curl -fsSL https://gvisor.dev/archive.key \
+  | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
+  > /etc/apt/sources.list.d/gvisor.list
+apt-get update && apt-get install -y runsc
+runsc install && systemctl restart docker   # or restart dockerd
+
+docker run --rm --runtime=runsc alpine uname -sr   # => Linux 4.19.0-gvisor
+```
+
+Measured on that setup: build 19.1s, **cold start 2.34s under gVisor**, against
+1.70s unsandboxed. Sandboxing cost roughly 0.6 seconds.
+
+### What still needs solving on Windows
+
+| Problem | Fix |
+|---|---|
+| The machine sleeps | `powercfg /change standby-timeout-ac 0`, and set lid-close to "do nothing" |
+| `dockerd` doesn't start on boot | Enable systemd in `/etc/wsl.conf` (`[boot]` / `systemd=true`), then a Task Scheduler entry running `wsl -d Ubuntu-24.04 -u root -- true` at startup |
+| No inbound ports from the internet | Tailscale Funnel, or a Cloudflare Tunnel. Both are free and work behind CGNAT |
+| Windows Update reboots | Not fully suppressible on Home edition. Accept the outage, or use a machine you control |
+
+Reasonable for a small team's internal tools. Not equivalent to a server you
+can reboot deliberately.
