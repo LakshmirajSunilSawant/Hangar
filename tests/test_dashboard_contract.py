@@ -114,3 +114,63 @@ def test_source_types_are_all_known_to_the_frontend():
         re.findall(r'"(\w+)"', re.search(r"export type SourceType =(.*?);", source).group(1))
     )
     assert {"path", "zip", "repo"} == declared
+
+
+# --------------------------------------------------------------------------
+# Identity and sharing types
+# --------------------------------------------------------------------------
+
+
+def test_whoami_response_matches(client):
+    assert interface_fields("WhoAmI") <= set(client.get("/auth/me").json())
+
+
+def test_grant_response_matches(client, app_id, monkeypatch):
+    from hangar import identity, store
+
+    with store.session() as sess:
+        _, token = identity.invite(sess, "person@example.com")
+        identity.accept_invite(sess, token, "correct-horse-battery")
+
+    # Anonymous access stops the moment any account exists, so this needs a
+    # credential even though the rest of the module doesn't.
+    monkeypatch.setenv("HANGAR_API_TOKEN", "contract-token")
+
+    response = client.put(
+        f"/apps/{app_id}/access",
+        json={"email": "person@example.com", "role": "viewer"},
+        headers={"Authorization": "Bearer contract-token"},
+    )
+    assert response.status_code == 200, response.text
+    assert interface_fields("Grant") <= set(response.json())
+
+
+def test_user_and_invite_responses_match(client):
+    body = client.post("/users", json={"email": "new@example.com"}).json()
+
+    assert interface_fields("Invite") <= set(body)
+    assert interface_fields("User") <= set(body["user"])
+
+
+def test_roles_are_all_known_to_the_frontend():
+    """An unmapped role renders no summary text in the sharing panel."""
+    import re
+
+    from hangar.store import Role
+
+    source = TYPES_FILE.read_text(encoding="utf-8")
+    declared = set(
+        re.findall(r'"(\w+)"', re.search(r"export type Role =(.*?);", source).group(1))
+    )
+    assert {r.value for r in Role} == declared
+
+
+def test_role_summaries_cover_every_role():
+    import re
+
+    from hangar.store import Role
+
+    source = TYPES_FILE.read_text(encoding="utf-8")
+    block = re.search(r"ROLE_SUMMARY: Record<Role, string> = \{(.*?)\};", source, re.DOTALL)
+    described = set(re.findall(r"^\s*(\w+):", block.group(1), re.MULTILINE))
+    assert {r.value for r in Role} == described

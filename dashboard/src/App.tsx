@@ -1,26 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, api, getToken, setToken } from "./api";
+import { ApiError, api, setToken } from "./api";
 import { AppDetail } from "./components/AppDetail";
 import { NewApp } from "./components/NewApp";
+import { SignIn } from "./components/SignIn";
 import { Chip, StatusChip } from "./components/StatusChip";
-import { IN_FLIGHT, type App, type Health } from "./types";
+import { IN_FLIGHT, type App, type Health, type WhoAmI } from "./types";
 
 export default function Dashboard() {
   const [apps, setApps] = useState<App[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [needsToken, setNeedsToken] = useState(false);
+  const [who, setWho] = useState<WhoAmI | null>(null);
+  const [needsSignIn, setNeedsSignIn] = useState(false);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setApps(await api.list());
-      setNeedsToken(false);
+      const [rows, me] = await Promise.all([api.list(), api.me()]);
+      setApps(rows);
+      setWho(me);
+      setNeedsSignIn(false);
       setError("");
     } catch (err) {
-      if (err instanceof ApiError && err.isAuthError) setNeedsToken(true);
+      if (err instanceof ApiError && err.isAuthError) setNeedsSignIn(true);
       else setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoaded(true);
@@ -32,6 +36,17 @@ export default function Dashboard() {
     api.health().then(setHealth).catch(() => setHealth(null));
   }, [load]);
 
+  async function signOut() {
+    // Clear both credentials: a stale token in localStorage would silently
+    // sign the browser back in as an operator on the next request.
+    await api.logout().catch(() => undefined);
+    setToken("");
+    setApps([]);
+    setSelected(null);
+    setWho(null);
+    setNeedsSignIn(true);
+  }
+
   // Keep the list moving while anything is mid-deploy, then stop.
   const anyInFlight = apps.some((a) => IN_FLIGHT.includes(a.status));
   useEffect(() => {
@@ -40,15 +55,25 @@ export default function Dashboard() {
     return () => clearInterval(timer);
   }, [anyInFlight, selected, load]);
 
-  if (needsToken) return <TokenGate onSaved={load} />;
+  if (needsSignIn) return <SignIn onSignedIn={() => void load()} />;
 
   const current = apps.find((a) => a.id === selected) ?? null;
+  const canCreate = who?.is_admin ?? true;
 
   return (
     <div className="shell">
       <header className="top">
         <h1>Hangar</h1>
         <span className="tagline">Cloud for small software</span>
+        <div className="grow" style={{ flex: 1 }} />
+        {who?.authenticated && (
+          <span className="row" style={{ fontSize: 13 }}>
+            <span className="muted">{who.email ?? "API token"}</span>
+            <button className="link" onClick={() => void signOut()}>
+              Sign out
+            </button>
+          </span>
+        )}
       </header>
 
       {health && <HealthBar health={health} />}
@@ -81,9 +106,13 @@ export default function Dashboard() {
             <strong>{apps.length} app{apps.length === 1 ? "" : "s"}</strong>
             <div className="row">
               <button onClick={() => void load()}>Refresh</button>
-              <button className="primary" onClick={() => setCreating(true)}>
-                Deploy an app
-              </button>
+              {/* Only operators may create apps, so don't offer a button
+                  that would return 403. */}
+              {canCreate && (
+                <button className="primary" onClick={() => setCreating(true)}>
+                  Deploy an app
+                </button>
+              )}
             </div>
           </div>
           <AppList apps={apps} loaded={loaded} onSelect={setSelected} />
@@ -162,38 +191,3 @@ function HealthBar({ health }: { health: Health }) {
   );
 }
 
-function TokenGate({ onSaved }: { onSaved: () => void }) {
-  const [value, setValue] = useState(getToken());
-
-  return (
-    <div className="shell">
-      <form
-        className="card gate"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setToken(value.trim());
-          onSaved();
-        }}
-      >
-        <h1 style={{ fontSize: 20, marginTop: 0 }}>Hangar</h1>
-        <p className="muted" style={{ fontSize: 14 }}>
-          This control plane requires an API token.
-        </p>
-        <div className="field">
-          <label htmlFor="token">API token</label>
-          <input
-            id="token"
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-          />
-          <div className="hint">The value of HANGAR_API_TOKEN on the server.</div>
-        </div>
-        <button className="primary" type="submit" disabled={!value.trim()}>
-          Continue
-        </button>
-      </form>
-    </div>
-  );
-}

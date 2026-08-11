@@ -65,3 +65,43 @@ export interface Health {
 
 /** Statuses that can still change on their own, so the UI keeps polling. */
 export const IN_FLIGHT: AppStatus[] = ["queued", "building"];
+
+export type Role = "owner" | "editor" | "viewer";
+
+export interface WhoAmI {
+  kind: string;
+  email: string | null;
+  is_admin: boolean;
+  authenticated: boolean;
+}
+
+export interface Grant {
+  user_id: string;
+  email: string;
+  role: Role;
+  can: string[];
+  granted_at: string;
+}
+
+export interface User {
+  id: string;
+  email: string;
+  is_admin: boolean;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Invite {
+  user: User;
+  /** One-time. Hangar sends no email, so this is handed over directly. */
+  invite_token: string;
+}
+
+export const ROLES: Role[] = ["owner", "editor", "viewer"];
+
+/** What each role may do, mirroring hangar/permissions.py for the UI copy. */
+export const ROLE_SUMMARY: Record<Role, string> = {
+  owner: "Full control, including sharing and deleting",
+  editor: "Can deploy, restart, and read logs",
+  viewer: "Can see the app — not its logs",
+};

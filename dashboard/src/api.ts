@@ -1,13 +1,27 @@
 /** Client for the Hangar control plane.
  *
- * The API token lives in localStorage. That is readable by any script on the
- * page, which is acceptable only because this dashboard is served by the
- * control plane itself and loads no third-party code. It would not be
- * acceptable once the PRD's per-user identity layer exists — that wants a
- * session cookie the page cannot read.
+ * Two ways to authenticate, matching the server:
+ *
+ * - **Signing in** sets an HttpOnly session cookie. This code never sees it,
+ *   which is the point: a script on the page cannot read or exfiltrate it.
+ *   That is the path people should use.
+ * - **The admin API token**, kept in localStorage, for operators driving the
+ *   control plane directly. localStorage is readable by any script on the
+ *   page, so this is the weaker option and is offered as a fallback rather
+ *   than the default.
  */
 
-import type { App, Health, Logs, Scan } from "./types";
+import type {
+  App,
+  Grant,
+  Health,
+  Invite,
+  Logs,
+  Role,
+  Scan,
+  User,
+  WhoAmI,
+} from "./types";
 
 const TOKEN_KEY = "hangar.token";
 
@@ -44,7 +58,9 @@ async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(path, { ...init, headers });
+    // Session cookies are HttpOnly, so they ride along automatically; the
+    // token header is only used by operators driving the API directly.
+    response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   } catch {
     // fetch only rejects on network failure, which for a page served by the
     // control plane almost always means the control plane stopped.
@@ -115,4 +131,49 @@ export const api = {
   stop: (id: string) => request<App>(`/apps/${id}/stop`, { method: "POST" }),
   restart: (id: string) => request<App>(`/apps/${id}/restart`, { method: "POST" }),
   remove: (id: string) => request<void>(`/apps/${id}`, { method: "DELETE" }),
+
+  // -- who am I ------------------------------------------------------
+
+  me: () => request<WhoAmI>("/auth/me"),
+
+  login: (email: string, password: string) =>
+    request<WhoAmI>("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    }),
+
+  logout: () => request<void>("/auth/logout", { method: "POST" }),
+
+  acceptInvite: (token: string, password: string) =>
+    request<WhoAmI>("/auth/accept-invite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password }),
+    }),
+
+  // -- people --------------------------------------------------------
+
+  listUsers: () => request<User[]>("/users"),
+
+  inviteUser: (email: string, isAdmin = false) =>
+    request<Invite>("/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, is_admin: isAdmin }),
+    }),
+
+  // -- sharing -------------------------------------------------------
+
+  access: (id: string) => request<Grant[]>(`/apps/${id}/access`),
+
+  grant: (id: string, email: string, role: Role) =>
+    request<Grant>(`/apps/${id}/access`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, role }),
+    }),
+
+  revoke: (id: string, userId: string) =>
+    request<void>(`/apps/${id}/access/${userId}`, { method: "DELETE" }),
 };
