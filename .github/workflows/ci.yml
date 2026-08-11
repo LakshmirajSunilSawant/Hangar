@@ -14,7 +14,7 @@ jobs:
   tests:
     name: Python tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     # GitHub's Linux runners ship a working Docker daemon, so the `slow` tests
     # that build real images and start real containers run here too. Those are
@@ -45,11 +45,13 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install
-        run: uv pip install --system -e ".[dev,postgres]"
+      # A project virtualenv, not --system: the runner's Python is
+      # externally managed and uv refuses to install into it. This also makes
+      # CI run the project exactly the way a developer does locally.
+      - name: Create environment
+        run: |
+          uv venv --python 3.12
+          uv pip install -e ".[dev,postgres]"
 
       - name: Check Docker is usable
         # The slow tests skip themselves when Docker is unreachable, so without
@@ -57,7 +59,7 @@ jobs:
         run: docker version
 
       - name: Run tests
-        run: pytest -q --durations=10
+        run: uv run pytest -q --durations=10
 
   dashboard:
     name: Dashboard build
@@ -82,7 +84,7 @@ jobs:
       - run: npm run build
 
   security:
-    name: Security scan (self-check)
+    name: Security self-check
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -91,18 +93,23 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - run: uv pip install --system -e ".[dev]" bandit semgrep
+      - name: Create environment
+        run: |
+          uv venv --python 3.12
+          uv pip install -e ".[dev]" bandit
 
       # Hangar scans other people's code; it should survive its own scanner.
+      # Informational: the scanner correctly flags its own rule tables (the
+      # strings it looks for are, unavoidably, in the file that looks for them).
       - name: Run Hangar's scanner over Hangar
         run: |
-          python -c "
+          uv run python -c "
           from hangar import scan
           result = scan.scan('hangar')
           print(result.summary())
           for f in result.findings:
-              print(f'  [{f.severity}] {f.file}:{f.line} {f.rule} — {f.message}')
+              print(f'  [{f.severity}] {f.file}:{f.line} {f.rule} - {f.message}')
           "
 
       - name: Bandit
-        run: bandit -r hangar -q || true
+        run: uv run bandit -r hangar -q || true
