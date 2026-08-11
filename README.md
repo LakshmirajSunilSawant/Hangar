@@ -61,6 +61,7 @@ The PRD specifies **gVisor/Kata** for isolating untrusted code — that is the r
 
 To run this on a server, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — the
 $0-forever setup on an Oracle Always Free VM, including the gVisor sandbox.
+To show it to someone, see [docs/DEMO.md](docs/DEMO.md).
 
 ## Setup
 
