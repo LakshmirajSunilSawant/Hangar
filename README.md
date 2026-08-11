@@ -29,6 +29,8 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Platform-level auth in front of apps | working |
 | Per-app databases (SQLite or Postgres) | working |
 | CI (GitHub Actions) | working |
+| One-command deploy (Docker Compose) | working |
+| Backups (restic) | working |
 
 Measured locally (x86, WSL2, warm base image layers):
 
@@ -53,6 +55,15 @@ To run this on a server, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — the
 $0-forever setup on an Oracle Always Free VM, including the gVisor sandbox.
 
 ## Setup
+
+**On a server**, one command brings up the control plane, Postgres and Caddy:
+
+```bash
+cp .env.example .env    # fill in the generated secrets
+docker compose up -d
+```
+
+**For development**, run it directly:
 
 ```bash
 uv venv
@@ -261,6 +272,7 @@ hangar/
   api.py         FastAPI control plane
   cli.py         `hangar serve` / `hangar config`
 dashboard/       React + Vite owner UI, served by the control plane
+scripts/         backup.sh and restore.sh (restic)
 tests/           test suite; `slow` marker = needs Docker
 examples/        sample apps used to exercise the pipeline
 ```
