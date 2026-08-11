@@ -24,7 +24,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Caddy routing / stable per-app hostnames | working |
 | Static security scan before execution | working |
 | Egress default-deny | working |
-| Owner dashboard (React + Vite) | not started |
+| Owner dashboard (React + Vite) | working |
 | Auth + permissions (Ory Kratos) | not started |
 | Per-app database provisioning | not started |
 
@@ -59,11 +59,15 @@ uv pip install -e ".[dev]"
 
 ## Usage
 
-Start the control plane:
+Build the dashboard once, then start the control plane:
 
 ```bash
-uv run hangar serve            # http://127.0.0.1:8080, docs at /docs
+cd dashboard && npm install && npm run build && cd ..
+uv run hangar serve            # http://127.0.0.1:8080
 ```
+
+That serves the owner dashboard at `/`, the API under `/apps`, and OpenAPI docs
+at `/docs`. The dashboard is optional — the API works without it.
 
 Deploy an app by pointing at a source directory:
 
@@ -172,7 +176,8 @@ through it.
 ## Development
 
 ```bash
-uv run pytest                  # everything (builds real images, ~25s)
+cd dashboard && npm run dev    # dashboard on :5173, proxying the API to :8080
+uv run pytest                  # everything (builds real images, ~75s)
 uv run pytest -m "not slow"    # fast tests only, no Docker needed
 ```
 
@@ -204,6 +209,7 @@ hangar/
   auth.py        shared-token API auth
   api.py         FastAPI control plane
   cli.py         `hangar serve` / `hangar config`
+dashboard/       React + Vite owner UI, served by the control plane
 tests/           test suite; `slow` marker = needs Docker
 examples/        sample apps used to exercise the pipeline
 ```

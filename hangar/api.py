@@ -7,6 +7,7 @@ owner/editor/viewer permissions are still Milestone 3.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import backends, config, ingest, routing
@@ -389,3 +391,36 @@ def _act(action, app_id: str) -> None:
 
 
 api.include_router(apps)
+
+
+# --------------------------------------------------------------------------
+# Dashboard
+# --------------------------------------------------------------------------
+
+
+def dashboard_dir() -> Path:
+    override = os.environ.get("HANGAR_DASHBOARD_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+
+
+def mount_dashboard(app: FastAPI = api) -> bool:
+    """Serve the built dashboard, if it has been built.
+
+    Mounted last so it never shadows the API: Starlette matches routes in
+    registration order, and this one matches everything.
+
+    The dashboard is unauthenticated on purpose — it is a static bundle with no
+    secrets in it, and it asks the user for the API token, which every request
+    it makes then carries.
+    """
+    directory = dashboard_dir()
+    if not (directory / "index.html").is_file():
+        return False
+
+    app.mount("/", StaticFiles(directory=str(directory), html=True), name="dashboard")
+    return True
+
+
+mount_dashboard()

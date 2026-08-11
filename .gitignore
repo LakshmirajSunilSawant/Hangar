@@ -13,8 +13,11 @@ build/
 *.db
 *.sqlite3
 
-# Node (deployed sample apps)
+# Node
 node_modules/
+
+# Built dashboard — produced by `npm run build`, not source
+dashboard/dist/
 
 # Editors / OS
 .vscode/

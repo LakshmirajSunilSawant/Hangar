@@ -229,6 +229,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv && uv pip install -e ".[postgres]"
 ```
 
+The owner dashboard is built from source rather than committed, so build it
+once (Node 20+, roughly a second on this hardware):
+
+```bash
+sudo apt install -y nodejs npm
+cd dashboard && npm ci && npm run build && cd ..
+```
+
+Skip this if you only want the API — the control plane runs fine without it.
+
 Configuration:
 
 ```bash
