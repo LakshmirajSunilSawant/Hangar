@@ -1,8 +1,12 @@
 """Hangar control plane API.
 
-Routes under /apps require the shared bearer token from HANGAR_API_TOKEN
-(see auth.py). That guards the control plane itself; per-user identity and
-owner/editor/viewer permissions are still Milestone 3.
+Callers are either the shared admin token (scripts, CI) or a signed-in user
+scoped to their owner/editor/viewer grants — see auth.py for how that is
+resolved and permissions.py for what each role may do.
+
+/internal/authorize is the forward-auth endpoint the proxy in front of
+deployed apps calls, which is what makes authentication platform-level rather
+than something every app has to implement (PRD §8).
 """
 
 from __future__ import annotations
@@ -20,20 +24,32 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
+    Response,
     UploadFile,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backends, config, database, ingest, routing
+from . import backends, config, database, identity, ingest, routing
 from . import deploy as deploy_mod
 from . import store
-from .auth import require_token
+from .auth import authorize, current_principal, require_admin, require_token
 from .backends import BackendError
 from .database import DatabaseError
 from .ingest import IngestError
 from .routing import RoutingError
-from .store import AppStatus
+from .identity import Principal
+from .permissions import Action
+from .routes_auth import (
+    GrantRequest,
+    GrantView,
+    auth_router,
+    grant_view,
+    users_router,
+    validate_role,
+)
+from .store import AppStatus, Permission, Role
 
 api = FastAPI(
     title="Hangar",
@@ -154,8 +170,81 @@ def healthz() -> dict:
     }
 
 
+@api.get("/internal/authorize", tags=["meta"], include_in_schema=False)
+def authorize_app_request(request: Request, response: Response):
+    """Forward-auth endpoint for the proxy in front of deployed apps.
+
+    PRD §8: "recipients authenticate to [the platform] before ever reaching the
+    app's own routes, via a proxy layer that injects identity headers." Caddy
+    asks this endpoint about every request; a 2xx lets it through and the
+    response headers are copied onto the upstream request, so the app learns
+    who the user is without implementing any auth itself.
+
+    Deliberately unauthenticated as a route: it *is* the authentication check,
+    and answering 401 is a normal outcome rather than an error.
+    """
+    hostname = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or ""
+    ).split(":")[0]
+
+    with store.session() as sess:
+        app = _app_for_hostname(sess, hostname)
+        if app is None:
+            raise HTTPException(404, f"no app is served at {hostname!r}")
+
+        user = identity.resolve_session(
+            sess, request.cookies.get(identity.SESSION_COOKIE, "")
+        )
+        if user is None:
+            # 401 rather than a redirect: the proxy decides how to present a
+            # login, and an API client behind the same hostname needs a status
+            # it can act on.
+            raise HTTPException(
+                401,
+                "sign in to reach this app",
+                headers={"WWW-Authenticate": "Cookie"},
+            )
+
+        role = None if user.is_admin else _role_for_user(sess, app.id, user.id)
+        if not user.is_admin and role is None:
+            raise HTTPException(403, "you do not have access to this app")
+
+        # Headers the app can trust, because it can only be reached through
+        # this proxy — see the note in routing.py about binding apps to the
+        # proxy's network.
+        response.headers["X-Hangar-User"] = user.email
+        response.headers["X-Hangar-User-Id"] = user.id
+        response.headers["X-Hangar-Role"] = "owner" if user.is_admin else role.value
+        return {"ok": True}
+
+
+def _app_for_hostname(sess, hostname: str):
+    """Find the app a request hostname belongs to."""
+    if not hostname:
+        return None
+    settings = config.settings()
+    if not settings.app_domain:
+        return None
+
+    suffix = "." + settings.app_domain.strip(".")
+    if not hostname.endswith(suffix):
+        return None
+    return store.app_by_name(sess, hostname[: -len(suffix)])
+
+
+def _role_for_user(sess, app_id: str, user_id: str):
+    permission = store.permission_for(sess, app_id, user_id)
+    return Role(permission.role) if permission else None
+
+
 @apps.post("", response_model=AppView, status_code=202)
-def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppView:
+def create_app(
+    request: CreateAppRequest,
+    background: BackgroundTasks,
+    principal: Principal = Depends(require_admin),
+) -> AppView:
     """Register an app and kick off a deploy.
 
     Returns 202 immediately — the build takes far longer than a request should.
@@ -198,6 +287,7 @@ def create_app(request: CreateAppRequest, background: BackgroundTasks) -> AppVie
         _reject_duplicate(sess, name)
         app = store.App(name=name, db_type=db_type, **fields)
         store.save(sess, app)
+        _make_owner(sess, principal, app.id)
         view = AppView.of(app)
 
     background.add_task(deploy_mod.deploy, view.id)
@@ -209,6 +299,7 @@ async def upload_app(
     background: BackgroundTasks,
     name: str = Form(description="Lowercase app name."),
     file: UploadFile = File(description="Zip archive of the app's source."),
+    principal: Principal = Depends(require_admin),
     # Aliased so the wire name stays "database" without shadowing the module.
     db_choice: str | None = Form(
         default=None, alias="database", description="none, sqlite, or postgres."
@@ -242,6 +333,7 @@ async def upload_app(
             db_type=db_type,
         )
         store.save(sess, app)
+        _make_owner(sess, principal, app.id)
         view = AppView.of(app)
 
     background.add_task(deploy_mod.deploy, view.id)
@@ -249,21 +341,34 @@ async def upload_app(
 
 
 @apps.get("", response_model=list[AppView])
-def list_apps() -> list[AppView]:
+def list_apps(principal: Principal = Depends(current_principal)) -> list[AppView]:
+    """Only apps the caller has been granted access to."""
     with store.session() as sess:
-        return [AppView.of(app) for app in store.list_apps(sess)]
+        if principal.kind in ("admin", "anonymous") or principal.is_admin:
+            rows = store.list_apps(sess)
+        else:
+            rows = store.apps_visible_to(sess, principal.user_id)
+        return [AppView.of(app) for app in rows]
 
 
 @apps.get("/{app_id}", response_model=AppView)
-def get_app(app_id: str) -> AppView:
+def get_app(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> AppView:
     with store.session() as sess:
-        return AppView.of(_require(sess, app_id))
+        app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.VIEW)
+        return AppView.of(app)
 
 
 @apps.get("/{app_id}/logs", response_model=LogsView)
-def get_logs(app_id: str, tail: int = 200) -> LogsView:
+def get_logs(
+    app_id: str, tail: int = 200, principal: Principal = Depends(current_principal)
+) -> LogsView:
     with store.session() as sess:
         app = _require(sess, app_id)
+        # Logs can contain anything the app printed, so viewers are excluded.
+        authorize(sess, principal, app_id, Action.VIEW_LOGS)
         deployment = store.latest_deployment(sess, app_id)
         build_log = deployment.build_log if deployment else ""
 
@@ -298,10 +403,99 @@ def get_scan(app_id: str) -> ScanView:
         )
 
 
+@apps.get("/{app_id}/access", response_model=list[GrantView])
+def list_access(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> list[GrantView]:
+    """Who can reach this app, and what they may do."""
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.SHARE)
+
+        grants = []
+        for permission in store.permissions_for_app(sess, app_id):
+            user = store.get_user(sess, permission.user_id)
+            if user is not None:
+                grants.append(grant_view(user, permission))
+        return grants
+
+
+@apps.put("/{app_id}/access", response_model=GrantView)
+def grant_access(
+    app_id: str,
+    request: GrantRequest,
+    principal: Principal = Depends(current_principal),
+) -> GrantView:
+    """Share an app with someone, or change what they may do.
+
+    The person must already have been invited — this grants access to an app,
+    it does not create accounts, so a typo in an email cannot silently hand
+    access to a stranger who later registers that address.
+    """
+    role = validate_role(request.role)
+
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.SHARE)
+
+        user = store.user_by_email(sess, request.email)
+        if user is None:
+            raise HTTPException(
+                404,
+                f"no user with email {request.email!r} — invite them first "
+                "(POST /users)",
+            )
+
+        permission = store.permission_for(sess, app_id, user.id)
+        if permission is None:
+            permission = Permission(app_id=app_id, user_id=user.id, role=role)
+        else:
+            permission.role = role
+
+        sess.add(permission)
+        sess.commit()
+        sess.refresh(permission)
+        return grant_view(user, permission)
+
+
+@apps.delete("/{app_id}/access/{user_id}", status_code=204)
+def revoke_access(
+    app_id: str, user_id: str, principal: Principal = Depends(current_principal)
+) -> None:
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.SHARE)
+
+        permission = store.permission_for(sess, app_id, user_id)
+        if permission is None:
+            raise HTTPException(404, "that user has no access to this app")
+
+        # Removing the last owner would leave an app nobody can share or
+        # delete, recoverable only with the admin token.
+        if permission.role == Role.OWNER:
+            owners = [
+                p
+                for p in store.permissions_for_app(sess, app_id)
+                if p.role == Role.OWNER
+            ]
+            if len(owners) <= 1:
+                raise HTTPException(
+                    409, "an app must keep at least one owner — grant another first"
+                )
+
+        sess.delete(permission)
+        sess.commit()
+
+
 @apps.post("/{app_id}/redeploy", response_model=AppView, status_code=202)
-def redeploy(app_id: str, background: BackgroundTasks) -> AppView:
+def redeploy(
+    app_id: str,
+    background: BackgroundTasks,
+    principal: Principal = Depends(current_principal),
+) -> AppView:
     with store.session() as sess:
         app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
         app.status = AppStatus.QUEUED
         app.error = None
         store.save(sess, app)
@@ -312,9 +506,12 @@ def redeploy(app_id: str, background: BackgroundTasks) -> AppView:
 
 
 @apps.post("/{app_id}/stop", response_model=AppView)
-def stop_app(app_id: str) -> AppView:
+def stop_app(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> AppView:
     with store.session() as sess:
         app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
         _act(backends.get_backend().stop, app_id)
         # Withdraw the route too, so the hostname fails cleanly instead of
         # proxying to a dead port.
@@ -326,10 +523,13 @@ def stop_app(app_id: str) -> AppView:
 
 
 @apps.post("/{app_id}/restart", response_model=AppView)
-def restart_app(app_id: str) -> AppView:
+def restart_app(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> AppView:
     backend = backends.get_backend()
     with store.session() as sess:
         app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
         _act(backend.restart, app_id)
 
         # The published port can change across a restart, so re-read it from
@@ -359,7 +559,11 @@ def restart_app(app_id: str) -> AppView:
 
 
 @apps.delete("/{app_id}", status_code=204)
-def delete_app(app_id: str, keep_data: bool = False) -> None:
+def delete_app(
+    app_id: str,
+    keep_data: bool = False,
+    principal: Principal = Depends(current_principal),
+) -> None:
     """Remove the app.
 
     Its database goes with it unless `keep_data=true`, since storage scoped to
@@ -368,6 +572,7 @@ def delete_app(app_id: str, keep_data: bool = False) -> None:
     """
     with store.session() as sess:
         app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DELETE)
         backends.get_backend().remove(app_id, missing_ok=True)
         routing.get_router().remove(app_id, missing_ok=True)
 
@@ -400,6 +605,18 @@ def _require(sess, app_id: str) -> store.App:
     if app is None:
         raise HTTPException(404, f"no app with id {app_id}")
     return app
+
+
+def _make_owner(sess, principal: Principal, app_id: str) -> None:
+    """Whoever created an app owns it.
+
+    The shared admin token belongs to no user, so there is nobody to record;
+    it is treated as owner everywhere anyway (see auth.role_for).
+    """
+    if principal.user_id is None:
+        return
+    sess.add(Permission(app_id=app_id, user_id=principal.user_id, role=Role.OWNER))
+    sess.commit()
 
 
 def _validate_name(name: str) -> str:
@@ -436,6 +653,8 @@ def _act(action, app_id: str) -> None:
         raise HTTPException(409, str(exc)) from exc
 
 
+api.include_router(auth_router)
+api.include_router(users_router)
 api.include_router(apps)
 
 

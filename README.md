@@ -25,7 +25,8 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Static security scan before execution | working |
 | Egress default-deny | working |
 | Owner dashboard (React + Vite) | working |
-| Auth + permissions (Ory Kratos) | not started |
+| Users, owner/editor/viewer permissions | working |
+| Platform-level auth in front of apps | working |
 | Per-app databases (SQLite or Postgres) | working |
 | CI (GitHub Actions) | working |
 
@@ -129,6 +130,10 @@ redacted).
 | `HANGAR_APP_DB` | `none` | Default per-app database: `none`, `sqlite`, `postgres` |
 | `HANGAR_APP_DB_ADMIN_URL` | unset | Postgres Hangar may create databases/roles on |
 | `HANGAR_SECRET_KEY` | unset | Seals stored secrets. Generate with `hangar gen-key` |
+| `HANGAR_IDENTITY` | `local` | Identity provider |
+| `HANGAR_SESSION_HOURS` | `336` | Session lifetime |
+| `HANGAR_APP_AUTH` | `0` | `1` requires sign-in before reaching any app |
+| `HANGAR_CONTROL_PLANE_ADDRESS` | `127.0.0.1:8080` | Where the proxy reaches Hangar for forward-auth |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -143,9 +148,46 @@ With no token set the API is unauthenticated, which keeps local development
 setup-free — and `hangar serve` **refuses to bind to a non-loopback interface**
 in that state, so an anonymous control plane can't be exposed by accident.
 
-This guards the control plane's own API. It is *not* the PRD's auth layer:
-per-user identity and owner/editor/viewer permissions via Ory Kratos are still
-Milestone 3.
+The token is for scripts and CI. People sign in instead, and are scoped to the
+apps they've been granted:
+
+| Role | Can |
+|---|---|
+| **owner** | view, logs, deploy, share, delete |
+| **editor** | view, logs, deploy |
+| **viewer** | view only — *not* logs, which can contain anything the app printed |
+
+Accounts are invite-based; Hangar sends no email (a mail service costs money),
+so `POST /users` returns a one-time token you pass to the person, the way you'd
+share a document link.
+
+```bash
+curl -X POST /users -d '{"email":"teammate@example.com"}'   # returns invite_token
+curl -X PUT /apps/<id>/access -d '{"email":"teammate@example.com","role":"viewer"}'
+```
+
+A caller with no access to an app gets **404, not 403** — whether an app exists
+is itself information.
+
+### Auth in front of the apps themselves
+
+PRD §8 wants recipients authenticated *before* they reach an app's own routes.
+With `HANGAR_APP_AUTH=1`, Caddy asks Hangar about every request via forward-auth
+and only then proxies it, adding `X-Hangar-User`, `X-Hangar-User-Id` and
+`X-Hangar-Role`.
+
+`examples/whoami` demonstrates it: the app contains no login code, no sessions
+and no user table, yet knows exactly who is visiting. Only trust those headers
+when the app is reachable *solely* through the proxy — pair this with
+`HANGAR_EGRESS=deny`, which takes apps off the host network entirely.
+
+### On Ory Kratos
+
+The PRD names Kratos. Kratos is a separate Go service with its own database,
+which is a lot to ask of a 12 GB box already running Postgres, Caddy and the
+sandboxes — so identity sits behind an `IdentityProvider` interface with a
+built-in provider that needs no extra services. A Kratos provider implements
+three methods and changes one env var.
 
 ### Routing
 
@@ -210,6 +252,9 @@ hangar/
   ingest.py      zip and GitHub sources, with hostile-archive handling
   database.py    per-app SQLite volumes and Postgres databases
   secrets.py     libsodium sealing for stored credentials
+  identity.py    invitations, passwords, sessions; provider interface
+  permissions.py the owner/editor/viewer capability table
+  routes_auth.py sign-in, invitations, sharing
   store.py       persistence (App, Deployment) on SQLite or Postgres
   config.py      environment-driven settings
   auth.py        shared-token API auth

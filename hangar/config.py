@@ -50,6 +50,10 @@ class Settings:
     app_db: str
     app_db_admin_url: str | None
     secret_key: str | None
+    identity_provider: str
+    session_hours: int
+    require_app_auth: bool
+    control_plane_address: str
 
     @property
     def auth_enabled(self) -> bool:
@@ -65,6 +69,12 @@ class Settings:
 
     def validate(self) -> None:
         """Reject combinations that cannot work, rather than failing at deploy."""
+        if self.require_app_auth and self.router == "none":
+            raise ValueError(
+                "HANGAR_APP_AUTH=1 gates apps behind the platform's login, "
+                "which requires a proxy in front of them. Set "
+                "HANGAR_ROUTER=caddy, or turn app auth off."
+            )
         if self.egress_denied and self.router == "none":
             raise ValueError(
                 "HANGAR_EGRESS=deny puts apps on an internal network with no "
@@ -145,6 +155,18 @@ def settings() -> Settings:
         # needed for the postgres mode.
         app_db_admin_url=_normalise_optional(_str("HANGAR_APP_DB_ADMIN_URL")),
         secret_key=_str("HANGAR_SECRET_KEY"),
+        identity_provider=os.environ.get("HANGAR_IDENTITY", "local"),
+        session_hours=_int("HANGAR_SESSION_HOURS", 24 * 14),
+        # PRD §8 wants recipients authenticated before they reach an app's own
+        # routes. Off by default because it needs the router in front of apps;
+        # validate() refuses the combination that cannot work.
+        require_app_auth=_bool("HANGAR_APP_AUTH", False),
+        # Where the proxy should reach the control plane for forward-auth.
+        # Not loopback by default when Caddy is containerised — same problem
+        # as HANGAR_UPSTREAM_HOST.
+        control_plane_address=os.environ.get(
+            "HANGAR_CONTROL_PLANE_ADDRESS", f"127.0.0.1:{DEFAULT_PORT}"
+        ),
     )
 
 
@@ -203,6 +225,13 @@ def _int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = _str(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
 
 
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:

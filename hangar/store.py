@@ -46,6 +46,14 @@ class DeploymentStatus(str, Enum):
     FAILED = "failed"
 
 
+class Role(str, Enum):
+    """PRD §7. Ordered by power; see `permissions.py` for what each may do."""
+
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
 class ScanStatus(str, Enum):
     SKIPPED = "skipped"
     CLEAN = "clean"
@@ -78,6 +86,60 @@ class App(SQLModel, table=True):
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class User(SQLModel, table=True):
+    """PRD §7. Identity lives with the platform, not with any deployed app."""
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    email: str = Field(index=True, unique=True)
+    # Which identity provider vouches for this user, and its id for them.
+    auth_provider: str = "local"
+    auth_provider_id: str | None = None
+    # argon2id, from libsodium. Empty until an invite is accepted, and always
+    # empty for externally-authenticated users.
+    password_hash: str = ""
+    # Hash of the one-time invite token; cleared once used.
+    invite_hash: str = ""
+    invited_at: datetime | None = None
+    is_admin: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self.password_hash) or self.auth_provider != "local"
+
+
+class Permission(SQLModel, table=True):
+    """Who may do what with one app (PRD §7)."""
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    app_id: str = Field(index=True, foreign_key="app.id")
+    user_id: str = Field(index=True, foreign_key="user.id")
+    role: str = Role.VIEWER
+    granted_at: datetime = Field(default_factory=utcnow)
+
+
+class UserSession(SQLModel, table=True):
+    """A logged-in browser.
+
+    Only the hash of the session token is stored, so a leaked database does not
+    hand over live sessions.
+    """
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    token_hash: str = Field(index=True, unique=True)
+    user_id: str = Field(index=True, foreign_key="user.id")
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+
+    def is_expired(self, now: datetime | None = None) -> bool:
+        moment = now or utcnow()
+        expires = self.expires_at
+        # SQLite hands back naive datetimes; compare like with like.
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return expires <= moment
 
 
 class AppDatabase(SQLModel, table=True):
@@ -176,6 +238,53 @@ def list_apps(sess: Session) -> list[App]:
 
 def app_by_name(sess: Session, name: str) -> App | None:
     return sess.exec(select(App).where(App.name == name)).first()
+
+
+def user_by_email(sess, email: str) -> User | None:
+    return sess.exec(select(User).where(User.email == email.strip().lower())).first()
+
+
+def get_user(sess, user_id: str) -> User | None:
+    return sess.get(User, user_id)
+
+
+def list_users(sess) -> list[User]:
+    return list(sess.exec(select(User).order_by(User.created_at)).all())
+
+
+def session_by_hash(sess, token_hash: str) -> UserSession | None:
+    return sess.exec(
+        select(UserSession).where(UserSession.token_hash == token_hash)
+    ).first()
+
+
+def permission_for(sess, app_id: str, user_id: str) -> Permission | None:
+    return sess.exec(
+        select(Permission)
+        .where(Permission.app_id == app_id)
+        .where(Permission.user_id == user_id)
+    ).first()
+
+
+def permissions_for_app(sess, app_id: str) -> list[Permission]:
+    return list(
+        sess.exec(select(Permission).where(Permission.app_id == app_id)).all()
+    )
+
+
+def apps_visible_to(sess, user_id: str) -> list[App]:
+    """Only apps this user has been granted something on."""
+    app_ids = [
+        p.app_id
+        for p in sess.exec(select(Permission).where(Permission.user_id == user_id)).all()
+    ]
+    if not app_ids:
+        return []
+    return list(
+        sess.exec(
+            select(App).where(App.id.in_(app_ids)).order_by(App.created_at.desc())
+        ).all()
+    )
 
 
 def deployments_for(sess: Session, app_id: str) -> list[Deployment]:

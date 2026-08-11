@@ -30,6 +30,10 @@ log = logging.getLogger("hangar.routing")
 ROUTE_ID_PREFIX = "hangar-"
 TIMEOUT = 10
 
+# Injected onto the upstream request once the platform has authorised it, so a
+# deployed app can tell who its visitor is without doing any auth (PRD §8).
+IDENTITY_HEADERS = ("X-Hangar-User", "X-Hangar-User-Id", "X-Hangar-Role")
+
 
 class RoutingError(Exception):
     """The router could not be reached or refused a change."""
@@ -128,7 +132,16 @@ class CaddyRouter(Router):
         self._request(
             "PUT",
             f"/config/apps/http/servers/{self.server}/routes/0",
-            json=route(app_id, hostname, upstream),
+            json=route(
+                app_id,
+                hostname,
+                upstream,
+                control_plane=(
+                    self.settings.control_plane_address
+                    if self.settings.require_app_auth
+                    else None
+                ),
+            ),
             expect_ok=True,
         )
         log.info("routed %s -> %s", hostname, upstream)
@@ -223,17 +236,73 @@ def route_id(app_id: str) -> str:
     return f"{ROUTE_ID_PREFIX}{app_id}"
 
 
-def route(app_id: str, hostname: str, upstream: str) -> dict:
-    """A Caddy route sending one hostname to one upstream dial address."""
+def forward_auth_handler(control_plane: str) -> dict:
+    """Ask Hangar about every request before the app ever sees it.
+
+    This is Caddy's `forward_auth` expressed in native JSON. The request is
+    copied to /internal/authorize; a 2xx lets it continue and the identity
+    headers from that response are copied onto the upstream request, so the
+    app is told who the user is without implementing any auth itself. Anything
+    else is returned to the browser as-is, which is how the 401 reaches it.
+    """
+    return {
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": control_plane}],
+        "rewrite": {"method": "GET", "uri": "/internal/authorize"},
+        # The authorize endpoint identifies the app by hostname, so the
+        # original Host must survive the rewrite.
+        "headers": {
+            "request": {
+                "set": {
+                    "X-Forwarded-Method": ["{http.request.method}"],
+                    "X-Forwarded-Uri": ["{http.request.uri}"],
+                    "X-Forwarded-Host": ["{http.request.host}"],
+                }
+            }
+        },
+        # Only a 2xx continues; every other status is served to the client.
+        "handle_response": [
+            {
+                "match": {"status_code": [2]},
+                "routes": [
+                    {
+                        "handle": [
+                            {
+                                "handler": "headers",
+                                "request": {
+                                    "set": {
+                                        name: [
+                                            "{http.reverse_proxy.header."
+                                            f"{name}}}"
+                                        ]
+                                        for name in IDENTITY_HEADERS
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def route(
+    app_id: str, hostname: str, upstream: str, control_plane: str | None = None
+) -> dict:
+    """A Caddy route sending one hostname to one upstream dial address.
+
+    When ``control_plane`` is given, requests are authorised by Hangar first.
+    """
+    handlers: list[dict] = []
+    if control_plane:
+        handlers.append(forward_auth_handler(control_plane))
+    handlers.append({"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]})
+
     return {
         "@id": route_id(app_id),
         "match": [{"host": [hostname]}],
-        "handle": [
-            {
-                "handler": "reverse_proxy",
-                "upstreams": [{"dial": upstream}],
-            }
-        ],
+        "handle": handlers,
         # Without this, Caddy keeps evaluating later routes after this one
         # matches, and a second app's route could also handle the request.
         "terminal": True,
