@@ -31,6 +31,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | CI (GitHub Actions) | working |
 | One-command deploy (Docker Compose) | working |
 | Backups (restic) | working |
+| `hangar deploy` CLI | working |
 
 Measured locally (x86, WSL2, warm base image layers):
 
@@ -270,7 +271,8 @@ hangar/
   config.py      environment-driven settings
   auth.py        shared-token API auth
   api.py         FastAPI control plane
-  cli.py         `hangar serve` / `hangar config`
+  cli.py         `hangar serve` / `deploy` / `config` / `gen-key`
+  client.py      HTTP client for deploying to a remote Hangar
 dashboard/       React + Vite owner UI, served by the control plane
 scripts/         backup.sh and restore.sh (restic)
 tests/           test suite; `slow` marker = needs Docker

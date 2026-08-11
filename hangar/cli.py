@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from . import __version__
@@ -25,6 +26,30 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config", help="show resolved configuration")
     sub.add_parser("gen-key", help="generate a HANGAR_SECRET_KEY")
 
+    deploy = sub.add_parser("deploy", help="deploy to a Hangar and wait for it")
+    deploy.add_argument(
+        "source",
+        help="a local directory, or a GitHub repo (owner/repo or a full URL)",
+    )
+    deploy.add_argument("--name", help="app name (defaults to the directory or repo)")
+    deploy.add_argument(
+        "--url",
+        default=os.environ.get("HANGAR_URL", "http://127.0.0.1:8080"),
+        help="control plane URL (or set HANGAR_URL)",
+    )
+    deploy.add_argument(
+        "--token",
+        default=os.environ.get("HANGAR_TOKEN") or os.environ.get("HANGAR_API_TOKEN"),
+        help="API token (or set HANGAR_TOKEN)",
+    )
+    deploy.add_argument("--ref", help="branch, tag or commit, for repos")
+    deploy.add_argument(
+        "--database", choices=("none", "sqlite", "postgres"), help="per-app storage"
+    )
+    deploy.add_argument(
+        "--no-wait", action="store_true", help="return as soon as it is queued"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "serve":
@@ -33,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         return _show_config()
     if args.command == "gen-key":
         return _gen_key()
+    if args.command == "deploy":
+        return _deploy(args)
 
     parser.print_help()
     return 1
@@ -46,6 +73,74 @@ def config_default_port() -> int:
 
     raw = os.environ.get("PORT", "").strip()
     return int(raw) if raw.isdigit() else config.DEFAULT_PORT
+
+
+def _deploy(args) -> int:
+    """Deploy a directory or a repo, then wait for the outcome."""
+    from pathlib import Path
+
+    from .client import Client, ClientError
+
+    source = Path(args.source).expanduser()
+    is_directory = source.is_dir()
+
+    name = args.name or _default_name(args.source, is_directory)
+    client = Client(base_url=args.url, token=args.token)
+
+    try:
+        existing = client.find_by_name(name)
+        if existing:
+            # Deploying the same name again means "update it", not "fail".
+            print(f"{name} already exists — redeploying", file=sys.stderr)
+            if is_directory:
+                print(
+                    "note: redeploy re-uses the previously uploaded source. "
+                    "Delete the app first to upload a new zip.",
+                    file=sys.stderr,
+                )
+            app = client.redeploy(existing["id"])
+        elif is_directory:
+            print(f"uploading {source}", file=sys.stderr)
+            app = client.deploy_directory(source, name, args.database)
+        else:
+            app = client.deploy_repo(args.source, name, args.ref, args.database)
+
+        if args.no_wait:
+            print(app["id"])
+            return 0
+
+        # ASCII only: this prints to whatever console the user has, and a
+        # Windows terminal in cp1252 mangles anything fancier.
+        final = client.wait(
+            app["id"], on_status=lambda s: print(f"  {s}...", file=sys.stderr)
+        )
+    except ClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if final["status"] != "running":
+        print(f"deploy failed: {final.get('error')}", file=sys.stderr)
+        # The build log is where the actual reason lives.
+        try:
+            log = client.logs(final["id"])["build_log"]
+            print("\n--- build log (last 40 lines) ---", file=sys.stderr)
+            print("\n".join(log.splitlines()[-40:]), file=sys.stderr)
+        except ClientError:
+            pass
+        return 1
+
+    print(final["url"])
+    return 0
+
+
+def _default_name(source: str, is_directory: bool) -> str:
+    """A sensible app name from a path or a repo reference."""
+    import re
+    from pathlib import Path
+
+    raw = Path(source).name if is_directory else source.rstrip("/").split("/")[-1]
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", raw.lower().removesuffix(".git")).strip("-")
+    return cleaned or "app"
 
 
 def _gen_key() -> int:
