@@ -8,11 +8,14 @@ type Tab = "logs" | "scan" | "people";
 
 export function AppDetail({
   app,
+  idleTimeout,
   onBack,
   onChanged,
   onDeleted,
 }: {
   app: App;
+  /** Seconds before an unused app sleeps; 0 when scale-to-zero is off. */
+  idleTimeout: number;
   onBack: () => void;
   onChanged: (app: App) => void;
   onDeleted: (id: string) => void;
@@ -93,9 +96,21 @@ export function AppDetail({
           <button disabled={!!busy} onClick={() => act("redeploy", () => api.redeploy(app.id))}>
             {busy === "redeploy" ? "Redeploying…" : "Redeploy"}
           </button>
+          {app.status === "running" && idleTimeout > 0 && (
+            // Stop keeps the app down until someone starts it; sleep keeps the
+            // URL live and lets the next visit bring it back.
+            <button disabled={!!busy} onClick={() => act("sleep", () => api.sleep(app.id))}>
+              {busy === "sleep" ? "Sleeping…" : "Sleep"}
+            </button>
+          )}
           {app.status === "running" ? (
             <button disabled={!!busy} onClick={() => act("stop", () => api.stop(app.id))}>
               Stop
+            </button>
+          ) : app.status === "sleeping" ? (
+            // A visit wakes it anyway; this is for warming it before a demo.
+            <button disabled={!!busy} onClick={() => act("wake", () => api.wake(app.id))}>
+              {busy === "wake" ? "Waking…" : "Wake"}
             </button>
           ) : (
             <button disabled={!!busy} onClick={() => act("restart", () => api.restart(app.id))}>
@@ -117,6 +132,12 @@ export function AppDetail({
             <a href={app.url} target="_blank" rel="noreferrer">{app.url}</a>
           ) : (
             <span className="muted">not running</span>
+          )}
+          {app.status === "sleeping" && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              Asleep to save memory. The link still works — the first visit
+              takes a moment longer while it starts.
+            </div>
           )}
         </Fact>
         <Fact k="Stack">

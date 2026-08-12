@@ -199,6 +199,44 @@ box is down *and* keeps activity above Oracle's idle-reclamation threshold.
 
 ---
 
+## 7b. Scale-to-zero
+
+12GB goes further if apps that nobody is using aren't holding memory. With
+`HANGAR_IDLE_TIMEOUT` set, an app with no traffic for that long has its
+container **stopped** — not removed — and the next visit starts it again. The
+URL never changes and nobody has to know it happened.
+
+```bash
+# in .env
+HANGAR_IDLE_TIMEOUT=1800        # 30 minutes
+HANGAR_IDLE_CHECK_INTERVAL=60
+HANGAR_WAKE_TIMEOUT=30
+```
+
+It needs a router, and Hangar refuses to start without one, because the proxy
+is the only thing that sees a request before the app does — that hook is both
+how activity is noticed and where the app gets started. Caddy then holds the
+request open, retrying the upstream for `HANGAR_WAKE_TIMEOUT`, while the
+container comes up.
+
+Measure what your visitors will actually wait:
+
+```bash
+EMAIL=you@example.com PASSWORD=... ./scripts/measure-wake.sh notes
+```
+
+Two things worth knowing before you turn it on:
+
+- **A slept app loses in-memory state.** Anything held in a process variable
+  rather than in its database is gone. This is already true across restarts and
+  redeploys, but sleeping makes it happen on a quiet afternoon instead.
+- **Last-seen times live in memory**, so restarting the control plane resets
+  every app's idle clock. That is deliberate — the alternative is a database
+  write on every request — and the effect is one extra timeout of grace, never
+  a wrongly slept app.
+
+---
+
 ## 8. Backups
 
 Losing the only VM without backups means losing everything.

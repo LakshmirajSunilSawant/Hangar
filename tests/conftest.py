@@ -22,6 +22,10 @@ ISOLATED_ENV = (
     "HANGAR_APP_MEMORY_MB",
     "HANGAR_APP_CPUS",
     "HANGAR_APP_PIDS",
+    # A set idle timeout would start a reaper thread under every test and stop
+    # apps mid-assertion.
+    "HANGAR_IDLE_TIMEOUT",
+    "HANGAR_IDLE_CHECK_INTERVAL",
 )
 
 
@@ -29,6 +33,16 @@ ISOLATED_ENV = (
 def isolated_env(monkeypatch):
     for name in ISOLATED_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def clean_idle_tracker():
+    """Last-seen times are process-global; leaking them across tests is a trap."""
+    from hangar import idle
+
+    idle.TRACKER.clear()
+    yield
+    idle.TRACKER.clear()
 
 
 @pytest.fixture
@@ -140,6 +154,9 @@ class FakeBackend(ExecutionBackend):
 
     def stop(self, app_id: str) -> None:
         FAKE.record("stop", app_id)
+
+    def start(self, app_id: str) -> None:
+        FAKE.record("start", app_id)
 
     def restart(self, app_id: str) -> None:
         FAKE.record("restart", app_id)

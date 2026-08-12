@@ -127,6 +127,15 @@ class ExecutionBackend(ABC):
         ...
 
     @abstractmethod
+    def start(self, app_id: str) -> None:
+        """Start an app that was stopped, without rebuilding or recreating it.
+
+        The counterpart to ``stop``, and the wake half of scale-to-zero. A
+        backend where stopping destroys the instance should implement this as a
+        fresh ``run`` of the last image.
+        """
+
+    @abstractmethod
     def restart(self, app_id: str) -> None:
         ...
 

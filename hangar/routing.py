@@ -138,9 +138,13 @@ class CaddyRouter(Router):
                 upstream,
                 control_plane=(
                     self.settings.control_plane_address
-                    if self.settings.require_app_auth
+                    if self.settings.hooks_requests
                     else None
                 ),
+                wake_timeout=(
+                    self.settings.wake_timeout if self.settings.idle_enabled else 0
+                ),
+                inject_identity=self.settings.require_app_auth,
             ),
             expect_ok=True,
         )
@@ -236,7 +240,7 @@ def route_id(app_id: str) -> str:
     return f"{ROUTE_ID_PREFIX}{app_id}"
 
 
-def forward_auth_handler(control_plane: str) -> dict:
+def forward_auth_handler(control_plane: str, inject_identity: bool = True) -> dict:
     """Ask Hangar about every request before the app ever sees it.
 
     This is Caddy's `forward_auth` expressed in native JSON. The request is
@@ -244,8 +248,13 @@ def forward_auth_handler(control_plane: str) -> dict:
     headers from that response are copied onto the upstream request, so the
     app is told who the user is without implementing any auth itself. Anything
     else is returned to the browser as-is, which is how the 401 reaches it.
+
+    With ``inject_identity`` off the hook still runs — that is how idle apps
+    are woken with app auth disabled — but no identity headers are copied,
+    because there is no identity to copy and setting them empty would let an
+    app mistake "anonymous" for "a user with a blank name".
     """
-    return {
+    handler: dict[str, Any] = {
         "handler": "reverse_proxy",
         "upstreams": [{"dial": control_plane}],
         "rewrite": {"method": "GET", "uri": "/internal/authorize"},
@@ -260,11 +269,16 @@ def forward_auth_handler(control_plane: str) -> dict:
                 }
             }
         },
-        # Only a 2xx continues; every other status is served to the client.
-        "handle_response": [
-            {
-                "match": {"status_code": [2]},
-                "routes": [
+    }
+
+    # Only a 2xx continues; every other status is served to the client. An
+    # empty `routes` still consumes the 2xx response rather than returning it
+    # to the browser, which is what lets the request carry on to the app.
+    handler["handle_response"] = [
+        {
+            "match": {"status_code": [2]},
+            "routes": (
+                [
                     {
                         "handle": [
                             {
@@ -281,14 +295,46 @@ def forward_auth_handler(control_plane: str) -> dict:
                             }
                         ]
                     }
-                ],
-            }
-        ],
+                ]
+                if inject_identity
+                else []
+            ),
+        }
+    ]
+    return handler
+
+
+def app_proxy_handler(upstream: str, wake_timeout: int = 0) -> dict:
+    """The handler that finally hands the request to the app.
+
+    ``wake_timeout`` is what makes scale-to-zero invisible. A sleeping app's
+    container has just been started by /internal/authorize but may not have
+    bound its port yet, so the first dial is refused. `try_duration` tells Caddy
+    to keep retrying that dial instead of returning a 502, and the visitor sees
+    a slow response rather than a broken one.
+
+    Caddy is the only component on the app's internal network, so it is also
+    the only one that *can* wait for the app to come up.
+    """
+    handler: dict[str, Any] = {
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": upstream}],
     }
+    if wake_timeout > 0:
+        handler["load_balancing"] = {
+            "try_duration": f"{wake_timeout}s",
+            "try_interval": "250ms",
+        }
+    return handler
 
 
 def route(
-    app_id: str, hostname: str, upstream: str, control_plane: str | None = None
+    app_id: str,
+    hostname: str,
+    upstream: str,
+    control_plane: str | None = None,
+    wake_timeout: int = 0,
+    inject_identity: bool = True,
 ) -> dict:
     """A Caddy route sending one hostname to one upstream dial address.
 
@@ -296,8 +342,8 @@ def route(
     """
     handlers: list[dict] = []
     if control_plane:
-        handlers.append(forward_auth_handler(control_plane))
-    handlers.append({"handler": "reverse_proxy", "upstreams": [{"dial": upstream}]})
+        handlers.append(forward_auth_handler(control_plane, inject_identity))
+    handlers.append(app_proxy_handler(upstream, wake_timeout))
 
     return {
         "@id": route_id(app_id),

@@ -55,10 +55,28 @@ class Settings:
     require_app_auth: bool
     control_plane_address: str
     cookie_domain: str | None
+    idle_timeout: int
+    idle_check_interval: int
+    wake_timeout: int
 
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_token)
+
+    @property
+    def idle_enabled(self) -> bool:
+        """Whether apps are put to sleep after a spell with no requests."""
+        return self.idle_timeout > 0
+
+    @property
+    def hooks_requests(self) -> bool:
+        """Whether the proxy should ask the control plane about every request.
+
+        True for app auth, and also for idle sleep — the same forward-auth hook
+        is what tells Hangar an app is being used, and what gives it somewhere
+        to wake the app before the request is proxied on.
+        """
+        return self.require_app_auth or self.idle_enabled
 
     @property
     def scan_enabled(self) -> bool:
@@ -88,6 +106,22 @@ class Settings:
                 if self.app_domain
                 else "HANGAR_APP_AUTH=1 needs HANGAR_COOKIE_DOMAIN and "
                 "HANGAR_APP_DOMAIN."
+            )
+        if self.idle_enabled and self.router == "none":
+            # Sleeping is only safe if something can wake the app again, and
+            # the only thing that sees an incoming request before the app does
+            # is the proxy. Without one, a slept app would simply be down.
+            raise ValueError(
+                "HANGAR_IDLE_TIMEOUT needs a proxy in front of apps so a "
+                "request can wake them — set HANGAR_ROUTER=caddy, or set "
+                "HANGAR_IDLE_TIMEOUT=0 to keep apps always on."
+            )
+        if self.idle_enabled and self.idle_timeout <= self.idle_check_interval:
+            # The reaper only notices idleness when it runs, so a check
+            # interval coarser than the timeout makes the timeout a fiction.
+            raise ValueError(
+                f"HANGAR_IDLE_TIMEOUT ({self.idle_timeout}s) must be longer "
+                f"than HANGAR_IDLE_CHECK_INTERVAL ({self.idle_check_interval}s)."
             )
         if self.egress_denied and self.router == "none":
             raise ValueError(
@@ -184,6 +218,14 @@ def settings() -> Settings:
         # Scopes the session cookie across subdomains. Unset means host-only,
         # which is correct until apps live on sibling hostnames.
         cookie_domain=_str("HANGAR_COOKIE_DOMAIN"),
+        # Scale-to-zero. Seconds without a request before an app's container is
+        # stopped; 0 keeps every app running forever. The container is stopped,
+        # not removed, so waking is a start rather than a rebuild.
+        idle_timeout=_int("HANGAR_IDLE_TIMEOUT", 0),
+        idle_check_interval=_int("HANGAR_IDLE_CHECK_INTERVAL", 30),
+        # How long the proxy keeps retrying an upstream that isn't listening
+        # yet. This is the window a waking app has to bind its port.
+        wake_timeout=_int("HANGAR_WAKE_TIMEOUT", 30),
     )
 
 

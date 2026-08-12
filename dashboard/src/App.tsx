@@ -82,6 +82,7 @@ export default function Dashboard() {
       {current ? (
         <AppDetail
           app={current}
+          idleTimeout={health?.idle_timeout ?? 0}
           onBack={() => setSelected(null)}
           onChanged={(fresh) =>
             setApps((prev) => prev.map((a) => (a.id === fresh.id ? fresh : a)))
@@ -168,6 +169,12 @@ function AppList({
   );
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)}m`;
+  return `${seconds}s`;
+}
+
 function HealthBar({ health }: { health: Health }) {
   // The sandbox line is the one that matters: "docker-default" means untrusted
   // code shares the host kernel, which the PRD treats as non-negotiable.
@@ -182,6 +189,12 @@ function HealthBar({ health }: { health: Health }) {
         sandbox: {sandboxed ? health.sandbox_runtime : "docker (shares host kernel)"}
       </Chip>
       <Chip tone={health.auth === "enabled" ? "ok" : "warn"}>auth: {health.auth}</Chip>
+      {health.idle_timeout > 0 && (
+        <Chip tone={health.idle_reaper ? "ok" : "warn"}>
+          sleeps after {formatDuration(health.idle_timeout)}
+          {health.idle_reaper ? "" : " (reaper not running)"}
+        </Chip>
+      )}
       {health.router !== "none" && (
         <Chip tone={health.router_available ? "ok" : "bad"}>
           router: {health.router}

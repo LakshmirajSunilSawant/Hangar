@@ -114,6 +114,44 @@ def test_upstream_host_is_configurable(monkeypatch):
     assert r["handle"][0]["upstreams"] == [{"dial": "host.docker.internal:3000"}]
 
 
+# -- waking a sleeping app -------------------------------------------------
+
+
+def test_no_retry_window_when_scale_to_zero_is_off():
+    """An always-on app that refuses a connection is broken, not waking."""
+    assert "load_balancing" not in route("abc", "h", "127.0.0.1:1")["handle"][0]
+
+
+def test_wake_timeout_makes_caddy_retry_the_upstream():
+    """A just-started container hasn't bound its port yet; a 502 here is a bug."""
+    proxy = route("abc", "h", "127.0.0.1:1", wake_timeout=30)["handle"][0]
+    assert proxy["load_balancing"]["try_duration"] == "30s"
+
+
+def test_the_retry_window_is_on_the_app_not_the_auth_hook():
+    """Retrying the control plane would just make a real 401 arrive slowly."""
+    handlers = route("abc", "h", "127.0.0.1:1", control_plane="cp:8080", wake_timeout=30)[
+        "handle"
+    ]
+    forward_auth, app_proxy = handlers
+    assert "load_balancing" not in forward_auth
+    assert app_proxy["load_balancing"]["try_duration"] == "30s"
+
+
+def test_identity_headers_are_not_injected_when_app_auth_is_off():
+    """The hook still runs — for waking — but there is no identity to copy.
+
+    Copying them anyway sets them empty, and an app reading X-Hangar-User would
+    see a blank string rather than nothing at all.
+    """
+    forward_auth = route(
+        "abc", "h", "127.0.0.1:1", control_plane="cp:8080", inject_identity=False
+    )["handle"][0]
+
+    assert forward_auth["handle_response"][0]["routes"] == []
+    assert "X-Hangar-User" not in json.dumps(forward_auth)
+
+
 # --------------------------------------------------------------------------
 # NullRouter — the default
 # --------------------------------------------------------------------------

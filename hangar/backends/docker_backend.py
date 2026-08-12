@@ -74,6 +74,9 @@ class DockerBackend(ExecutionBackend):
     def stop(self, app_id: str) -> None:
         runtime.stop(app_id)
 
+    def start(self, app_id: str) -> None:
+        runtime.start(app_id)
+
     def restart(self, app_id: str) -> None:
         runtime.restart(app_id)
 

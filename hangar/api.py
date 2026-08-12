@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import (
@@ -31,7 +32,7 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backends, config, database, identity, ingest, routing
+from . import backends, config, database, identity, idle, ingest, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import authorize, current_principal, require_admin, require_token
@@ -51,10 +52,26 @@ from .routes_auth import (
 )
 from .store import AppStatus, Permission, Role
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own the background threads that outlive a single request.
+
+    Only the idle reaper so far, and only when scale-to-zero is switched on —
+    which is why the default configuration starts no threads at all, and why
+    the test suite doesn't have one running underneath it.
+    """
+    idle.REAPER.start()
+    try:
+        yield
+    finally:
+        idle.REAPER.stop()
+
+
 api = FastAPI(
     title="Hangar",
     description="Cloud for small software — deploy a generated app to a live URL.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Everything under /apps is authenticated. /healthz stays open so a platform
@@ -167,6 +184,8 @@ def healthz() -> dict:
         "app_domain": settings.app_domain,
         "auth": "enabled" if settings.auth_enabled else "disabled",
         "sandbox_runtime": settings.sandbox_runtime or "docker-default",
+        "idle_timeout": settings.idle_timeout,
+        "idle_reaper": idle.REAPER.running,
     }
 
 
@@ -182,7 +201,12 @@ def authorize_app_request(request: Request, response: Response):
 
     Deliberately unauthenticated as a route: it *is* the authentication check,
     and answering 401 is a normal outcome rather than an error.
+
+    It is also where scale-to-zero happens. Waking is done *after* the access
+    check, so an anonymous stranger cannot start every app on the box by
+    walking the hostnames.
     """
+    settings = config.settings()
     hostname = (
         request.headers.get("x-forwarded-host")
         or request.headers.get("host")
@@ -193,31 +217,45 @@ def authorize_app_request(request: Request, response: Response):
         app = _app_for_hostname(sess, hostname)
         if app is None:
             raise HTTPException(404, f"no app is served at {hostname!r}")
+        app_id, sleeping = app.id, app.status == AppStatus.SLEEPING.value
 
-        user = identity.resolve_session(
-            sess, request.cookies.get(identity.SESSION_COOKIE, "")
-        )
-        if user is None:
-            # 401 rather than a redirect: the proxy decides how to present a
-            # login, and an API client behind the same hostname needs a status
-            # it can act on.
-            raise HTTPException(
-                401,
-                "sign in to reach this app",
-                headers={"WWW-Authenticate": "Cookie"},
+        if settings.require_app_auth:
+            user = identity.resolve_session(
+                sess, request.cookies.get(identity.SESSION_COOKIE, "")
+            )
+            if user is None:
+                # 401 rather than a redirect: the proxy decides how to present
+                # a login, and an API client behind the same hostname needs a
+                # status it can act on.
+                raise HTTPException(
+                    401,
+                    "sign in to reach this app",
+                    headers={"WWW-Authenticate": "Cookie"},
+                )
+
+            role = None if user.is_admin else _role_for_user(sess, app.id, user.id)
+            if not user.is_admin and role is None:
+                raise HTTPException(403, "you do not have access to this app")
+
+            # Headers the app can trust, because it can only be reached through
+            # this proxy — see the note in routing.py about binding apps to the
+            # proxy's network.
+            response.headers["X-Hangar-User"] = user.email
+            response.headers["X-Hangar-User-Id"] = user.id
+            response.headers["X-Hangar-Role"] = (
+                "owner" if user.is_admin else role.value
             )
 
-        role = None if user.is_admin else _role_for_user(sess, app.id, user.id)
-        if not user.is_admin and role is None:
-            raise HTTPException(403, "you do not have access to this app")
-
-        # Headers the app can trust, because it can only be reached through
-        # this proxy — see the note in routing.py about binding apps to the
-        # proxy's network.
-        response.headers["X-Hangar-User"] = user.email
-        response.headers["X-Hangar-User-Id"] = user.id
-        response.headers["X-Hangar-Role"] = "owner" if user.is_admin else role.value
-        return {"ok": True}
+    # Outside the session: waking opens its own, and holding this one across a
+    # container start would pin a connection for the length of the wake.
+    if settings.idle_enabled:
+        idle.TRACKER.touch(app_id)
+        if sleeping:
+            # Returns as soon as the container is started, not when the app is
+            # listening — Caddy retries the upstream for HANGAR_WAKE_TIMEOUT,
+            # and it is the only component on the app's network.
+            idle.wake(app_id)
+    return {"ok": True}
 
 
 def _app_for_hostname(sess, hostname: str):
@@ -519,7 +557,63 @@ def stop_app(
         app.status = AppStatus.STOPPED
         app.url = None
         store.save(sess, app)
+        # A deliberate stop is not idleness. Dropping the last-seen time keeps
+        # the reaper from reasoning about an app it must not touch.
+        idle.TRACKER.forget(app_id)
         return AppView.of(app)
+
+
+@apps.post("/{app_id}/sleep", response_model=AppView)
+def sleep_app(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> AppView:
+    """Stop a running app now, without waiting out its idle timeout.
+
+    The route stays published and the URL keeps working — that is the whole
+    difference from `/stop`, and the reason this is worth its own endpoint
+    rather than being an operator-only detail of the reaper.
+    """
+    settings = config.settings()
+    if not settings.idle_enabled:
+        raise HTTPException(
+            409,
+            "scale-to-zero is off, so a slept app would have nothing to wake "
+            "it — set HANGAR_IDLE_TIMEOUT, or use /stop.",
+        )
+
+    with store.session() as sess:
+        app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
+        if app.status != AppStatus.RUNNING.value:
+            raise HTTPException(409, f"{app.name} is {app.status}, not running")
+
+    if not idle.put_to_sleep(app_id):
+        raise HTTPException(502, "could not stop the app's container")
+
+    with store.session() as sess:
+        return AppView.of(_require(sess, app_id))
+
+
+@apps.post("/{app_id}/wake", response_model=AppView)
+def wake_app(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> AppView:
+    """Start a sleeping app without waiting for someone to visit it.
+
+    The proxy does this by itself on the first request; this is for the
+    dashboard, and for measuring wake time without a browser in the way.
+    """
+    with store.session() as sess:
+        app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
+        if app.status != AppStatus.SLEEPING.value:
+            raise HTTPException(409, f"{app.name} is {app.status}, not sleeping")
+
+    if not idle.wake(app_id):
+        raise HTTPException(502, "could not start the app's container")
+
+    with store.session() as sess:
+        return AppView.of(_require(sess, app_id))
 
 
 @apps.post("/{app_id}/restart", response_model=AppView)
@@ -555,6 +649,9 @@ def restart_app(
 
         app.status = AppStatus.RUNNING
         store.save(sess, app)
+        # Restarting counts as use; without this the reaper could sleep an app
+        # seconds after someone deliberately brought it back.
+        idle.TRACKER.touch(app_id)
         return AppView.of(app)
 
 
@@ -593,6 +690,7 @@ def delete_app(
             sess.delete(deployment)
         sess.delete(app)
         sess.commit()
+        idle.TRACKER.forget(app_id)
 
 
 # --------------------------------------------------------------------------

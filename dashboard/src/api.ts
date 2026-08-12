@@ -130,6 +130,8 @@ export const api = {
   redeploy: (id: string) => request<App>(`/apps/${id}/redeploy`, { method: "POST" }),
   stop: (id: string) => request<App>(`/apps/${id}/stop`, { method: "POST" }),
   restart: (id: string) => request<App>(`/apps/${id}/restart`, { method: "POST" }),
+  wake: (id: string) => request<App>(`/apps/${id}/wake`, { method: "POST" }),
+  sleep: (id: string) => request<App>(`/apps/${id}/sleep`, { method: "POST" }),
   remove: (id: string) => request<void>(`/apps/${id}`, { method: "DELETE" }),
 
   // -- who am I ------------------------------------------------------

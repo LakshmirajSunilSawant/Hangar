@@ -4,6 +4,8 @@ export type AppStatus =
   | "queued"
   | "building"
   | "running"
+  /** Stopped to save memory after a spell with no traffic, woken by a visit. */
+  | "sleeping"
   | "stopped"
   | "failed";
 
@@ -61,6 +63,9 @@ export interface Health {
   app_domain: string | null;
   auth: "enabled" | "disabled";
   sandbox_runtime: string;
+  /** Seconds of no traffic before an app sleeps; 0 means apps stay up. */
+  idle_timeout: number;
+  idle_reaper: boolean;
 }
 
 /** Statuses that can still change on their own, so the UI keeps polling. */

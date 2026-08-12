@@ -36,6 +36,10 @@ class AppStatus(str, Enum):
     QUEUED = "queued"
     BUILDING = "building"
     RUNNING = "running"
+    # Stopped by the idle reaper rather than by a person, and woken by the next
+    # request. Distinct from STOPPED because a deliberate stop must stay
+    # stopped — see idle.py.
+    SLEEPING = "sleeping"
     STOPPED = "stopped"
     FAILED = "failed"
 

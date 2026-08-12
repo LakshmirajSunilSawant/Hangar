@@ -50,6 +50,12 @@ services:
       HANGAR_COOKIE_DOMAIN: ${HANGAR_COOKIE_DOMAIN:-}
       HANGAR_CONTROL_PLANE_ADDRESS: hangar:8080
 
+      # Scale-to-zero. Apps stop after this long with no traffic and start
+      # again on the next request; 0 keeps them all resident.
+      HANGAR_IDLE_TIMEOUT: ${HANGAR_IDLE_TIMEOUT:-0}
+      HANGAR_IDLE_CHECK_INTERVAL: ${HANGAR_IDLE_CHECK_INTERVAL:-60}
+      HANGAR_WAKE_TIMEOUT: ${HANGAR_WAKE_TIMEOUT:-30}
+
       HANGAR_APP_DB: ${HANGAR_APP_DB:-sqlite}
       HANGAR_APP_DB_ADMIN_URL: postgresql://hangar:${POSTGRES_PASSWORD}@postgres:5432/hangar
       HANGAR_SCAN_POLICY: ${HANGAR_SCAN_POLICY:-flag}

@@ -88,16 +88,32 @@ def test_finding_shape_matches(client, app_id):
     assert interface_fields("Finding") <= set(findings[0])
 
 
+def declared_union(source: str, name: str) -> set[str]:
+    """The string literals of a TypeScript union type.
+
+    Comments are stripped first: a `;` inside one would otherwise end the
+    match early, and this test would quietly go on passing while checking only
+    the members above it.
+    """
+    body = re.search(
+        rf"export type {name} =(.*?);",
+        re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL),
+        re.DOTALL,
+    )
+    assert body, f"no `export type {name}` in types.ts"
+    return set(re.findall(r'"(\w+)"', body.group(1)))
+
+
 def test_app_status_values_are_all_known_to_the_frontend():
     """An unmapped status renders an undefined CSS class and no colour."""
-    declared = set(
-        re.findall(r'"(\w+)"', re.search(
-            r"export type AppStatus =(.*?);",
-            TYPES_FILE.read_text(encoding="utf-8"),
-            re.DOTALL,
-        ).group(1))
-    )
+    declared = declared_union(TYPES_FILE.read_text(encoding="utf-8"), "AppStatus")
     assert {s.value for s in store.AppStatus} == declared
+
+
+def test_the_union_check_would_notice_a_missing_status():
+    """Guard the guard — this check has been silently narrowed once already."""
+    source = 'export type AppStatus =\n  | "running"\n  /* a; comment */\n  | "failed";\n'
+    assert declared_union(source, "AppStatus") == {"running", "failed"}
 
 
 def test_scan_status_values_are_all_known_to_the_frontend():

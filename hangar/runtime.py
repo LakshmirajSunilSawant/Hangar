@@ -33,6 +33,7 @@ __all__ = [
     "remove",
     "restart",
     "run",
+    "start",
     "status",
     "stop",
 ]
@@ -188,6 +189,20 @@ def stop(app_id: str, *, docker_client: docker.DockerClient | None = None) -> No
         container.stop(timeout=10)
     except APIError as exc:
         raise DeployError(f"could not stop container: {exc}") from exc
+
+
+def start(app_id: str, *, docker_client: docker.DockerClient | None = None) -> None:
+    """Start an existing, stopped container.
+
+    Distinct from ``run``: nothing is created, so the image, volumes, network
+    attachment and sandbox runtime are all whatever the original deploy chose.
+    This is the wake half of scale-to-zero, and the reason waking is fast.
+    """
+    container = _require(app_id, docker_client)
+    try:
+        container.start()
+    except APIError as exc:
+        raise DeployError(f"could not start container: {exc}") from exc
 
 
 def restart(app_id: str, *, docker_client: docker.DockerClient | None = None) -> None:

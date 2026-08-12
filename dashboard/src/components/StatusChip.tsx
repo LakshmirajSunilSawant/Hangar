@@ -6,6 +6,8 @@ const APP_TONE: Record<AppStatus, Tone> = {
   running: "ok",
   building: "warn",
   queued: "idle",
+  // Not a problem and not an outage — the app is up, just not resident.
+  sleeping: "idle",
   stopped: "idle",
   failed: "bad",
 };

@@ -32,6 +32,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | One-command deploy (Docker Compose) | working |
 | Backups (restic) | working |
 | `hangar deploy` CLI | working |
+| Scale-to-zero (sleep on idle, wake on request) | working |
 
 Measured on x86 (WSL2, warm base image layers):
 
@@ -45,9 +46,15 @@ The gVisor number is the interesting one: a real sandbox, kernel `4.19.0-gvisor`
 still inside the PRD's <3s target. Sandboxing cost about 0.6s.
 
 **This is still not the Milestone 1 answer.** It is x86 rather than Ampere ARM,
-WSL2 rather than bare metal, and "cold start" here means stopping and restarting
-an existing container — Hangar has no scale-to-zero, so the idle-app-reopened
-case the PRD actually targets does not exist yet. Evidence, not a verdict.
+and WSL2 rather than bare metal. Evidence, not a verdict.
+
+Scale-to-zero now exists, so the case the PRD actually targets — an idle app
+being reopened — is measurable rather than hypothetical. Measure it on your own
+host, because the number depends entirely on the app and the sandbox:
+
+```bash
+./scripts/measure-wake.sh <app-name>
+```
 
 ### A note on the sandbox
 
@@ -117,6 +124,8 @@ curl http://127.0.0.1:8080/apps/<id>/logs   # build log + container log
 | `POST` | `/apps/{id}/redeploy` | Rebuild and replace the container |
 | `POST` | `/apps/{id}/stop` | Stop the container |
 | `POST` | `/apps/{id}/restart` | Restart and re-read the published port |
+| `POST` | `/apps/{id}/sleep` | Stop the container but keep the URL live |
+| `POST` | `/apps/{id}/wake` | Start a sleeping app without waiting for a visitor |
 | `DELETE` | `/apps/{id}` | Remove the container and forget the app |
 
 ## Configuration
@@ -155,6 +164,9 @@ redacted).
 | `HANGAR_APP_AUTH` | `0` | `1` requires sign-in before reaching any app |
 | `HANGAR_COOKIE_DOMAIN` | unset | Scopes the session across subdomains; required with app auth |
 | `HANGAR_CONTROL_PLANE_ADDRESS` | `127.0.0.1:8080` | Where the proxy reaches Hangar for forward-auth |
+| `HANGAR_IDLE_TIMEOUT` | `0` | Seconds without traffic before an app sleeps. `0` keeps apps resident |
+| `HANGAR_IDLE_CHECK_INTERVAL` | `30` | How often the reaper looks for idle apps |
+| `HANGAR_WAKE_TIMEOUT` | `30` | How long the proxy retries an app that is still starting |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -228,6 +240,35 @@ restarts even when the container's port changes — that's the point of it.
 
 Routes are inserted at the front of Caddy's route list. Caddy matches routes in
 order, so a route appended behind a catch-all is never reached.
+
+### Scale-to-zero
+
+A team accumulates more small tools than it uses at once, and a free VM has
+12 GB. With `HANGAR_IDLE_TIMEOUT` set, an app that has had no requests for that
+long has its container **stopped**; the next request starts it again.
+
+The mechanism reuses something that already exists. The proxy asks the control
+plane about every request before the app sees it — that is how platform auth
+works — so the same hook is a free activity signal *and* a place to start a
+stopped container before the request is proxied on:
+
+```
+visitor → Caddy → /internal/authorize  (may I? … and: wake it)
+                → app container        (Caddy retries until it's listening)
+```
+
+Three decisions worth knowing:
+
+- **Stopped, not removed.** The image, volumes, network attachment and gVisor
+  runtime all survive, so waking is a `docker start` rather than a rebuild.
+- **Waking happens after the access check**, so an anonymous stranger walking
+  hostnames cannot start every app on the box.
+- **Caddy does the waiting**, via `try_duration` on the app's upstream. The
+  control plane can't — it isn't on the apps' internal network, deliberately.
+
+Sleeping is not stopping: `/stop` withdraws the route and the app stays down
+until someone starts it, while a slept app's URL keeps working. The reaper only
+ever touches `running` apps, so a deliberate stop is never undone.
 
 ### Swapping the sandbox
 
