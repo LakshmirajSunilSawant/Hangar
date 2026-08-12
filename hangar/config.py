@@ -54,6 +54,7 @@ class Settings:
     session_hours: int
     require_app_auth: bool
     control_plane_address: str
+    control_plane_host: str | None
     cookie_domain: str | None
     idle_timeout: int
     idle_check_interval: int
@@ -226,6 +227,11 @@ def settings() -> Settings:
         control_plane_address=os.environ.get(
             "HANGAR_CONTROL_PLANE_ADDRESS", f"127.0.0.1:{DEFAULT_PORT}"
         ),
+        # Hostname the dashboard itself is served at. Set it and Hangar keeps
+        # its own route in the proxy alongside the apps', which matters because
+        # Caddy's image discards its whole routing table on restart — see
+        # reconcile.py. Unset means you publish that route yourself.
+        control_plane_host=_str("HANGAR_CONTROL_PLANE_HOST"),
         # Scopes the session cookie across subdomains. Unset means host-only,
         # which is correct until apps live on sibling hostnames.
         cookie_domain=_str("HANGAR_COOKIE_DOMAIN"),

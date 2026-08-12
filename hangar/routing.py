@@ -63,6 +63,15 @@ class Router(ABC):
     def remove(self, app_id: str, *, missing_ok: bool = True) -> None:
         ...
 
+    def upsert_host(self, *, route_id: str, hostname: str, upstream: str) -> None:
+        """Route one hostname straight to one address, with no app semantics.
+
+        Used for the control plane's own dashboard, which is not an app: no
+        forward-auth (it does its own), no wake window (it is always up). A
+        router with nothing to configure may ignore this.
+        """
+        return None
+
 
 class NullRouter(Router):
     """No routing — apps are reached directly on their published port.
@@ -150,6 +159,17 @@ class CaddyRouter(Router):
         )
         log.info("routed %s -> %s", hostname, upstream)
         return self.settings.url_for_app(app_name)
+
+    def upsert_host(self, *, route_id: str, hostname: str, upstream: str) -> None:
+        self._ensure_server()
+        self.remove(route_id, missing_ok=True)
+        self._request(
+            "PUT",
+            f"/config/apps/http/servers/{self.server}/routes/0",
+            json=route(route_id, hostname, upstream),
+            expect_ok=True,
+        )
+        log.info("routed %s -> %s", hostname, upstream)
 
     def remove(self, app_id: str, *, missing_ok: bool = True) -> None:
         response = self._request("DELETE", f"/id/{route_id(app_id)}")

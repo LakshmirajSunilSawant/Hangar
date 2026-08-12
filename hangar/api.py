@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import appsecrets, backends, config, database, identity, idle, ingest, metrics
-from . import routing
+from . import reconcile, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import authorize, current_principal, require_admin, require_token
@@ -62,6 +62,14 @@ async def lifespan(app: FastAPI):
     feature is switched off, which is why a default configuration runs no
     background threads at all.
     """
+    # Before anything else: Caddy's image discards its routing table on every
+    # restart, so a control plane that has just come up may be sitting behind a
+    # proxy that has forgotten every app. Rebuilding it is cheap and idempotent.
+    try:
+        reconcile.reconcile()
+    except Exception:  # noqa: BLE001 - never let this stop the control plane
+        log.exception("could not reconcile routes with the proxy")
+
     idle.REAPER.start()
     metrics.COLLECTOR.start()
     try:

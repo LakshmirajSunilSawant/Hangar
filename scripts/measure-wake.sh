@@ -2,6 +2,7 @@
 # Measure wake-from-idle: the PRD §9 number, end to end, through the proxy.
 #
 #   HANGAR_URL=http://127.0.0.1:8080 \
+#   LOGIN_URL=https://hangar.example.com \
 #   EMAIL=you@demo.local PASSWORD=... \
 #   ./scripts/measure-wake.sh notes
 #
@@ -24,6 +25,9 @@ set -euo pipefail
 APP_NAME="${1:?usage: measure-wake.sh <app-name> [rounds]}"
 ROUNDS="${2:-5}"
 BASE="${HANGAR_URL:-http://127.0.0.1:8080}"
+# Where to sign in. Must be the dashboard's public hostname when the session
+# cookie is scoped to a domain — see the sign-in step below.
+LOGIN_URL="${LOGIN_URL:-$BASE}"
 TOKEN="${HANGAR_API_TOKEN:-}"
 EMAIL="${EMAIL:-}"
 PASSWORD="${PASSWORD:-}"
@@ -74,11 +78,21 @@ fi
 # --- sign in, if apps are gated --------------------------------------------
 
 if [ -n "$EMAIL" ]; then
-    curl -fsS -c "$COOKIE_JAR" -X POST "$BASE/auth/login" \
+    # Sign in at the *public* dashboard hostname, not at a loopback address.
+    # With HANGAR_COOKIE_DOMAIN set the session cookie is scoped to the app
+    # domain, and curl silently discards a cookie whose domain doesn't match
+    # the host it was fetched from — leaving every measurement a 401.
+    curl -fsS -c "$COOKIE_JAR" -X POST "$LOGIN_URL/auth/login" \
         -H 'Content-Type: application/json' \
         -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" >/dev/null \
-        || die "sign-in failed for $EMAIL"
-    log "signed in as $EMAIL"
+        || die "sign-in failed for $EMAIL at $LOGIN_URL"
+
+    if [ ! -s "$COOKIE_JAR" ]; then
+        die "signed in, but no cookie was stored — HANGAR_COOKIE_DOMAIN is
+     probably scoped to the app domain, so set LOGIN_URL to the dashboard's
+     public hostname (e.g. https://hangar.$(api "$BASE/healthz" | j "['app_domain']"))"
+    fi
+    log "signed in as $EMAIL at $LOGIN_URL"
 else
     log "no EMAIL set — assuming apps are not behind platform auth"
 fi

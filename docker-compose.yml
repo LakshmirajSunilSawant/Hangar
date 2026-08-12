@@ -49,6 +49,10 @@ services:
       HANGAR_APP_AUTH: ${HANGAR_APP_AUTH:-0}
       HANGAR_COOKIE_DOMAIN: ${HANGAR_COOKIE_DOMAIN:-}
       HANGAR_CONTROL_PLANE_ADDRESS: hangar:8080
+      # Hostname for the dashboard itself. Setting it makes Hangar publish and
+      # re-publish its own route, which matters because Caddy's image drops its
+      # entire routing table on restart.
+      HANGAR_CONTROL_PLANE_HOST: ${HANGAR_CONTROL_PLANE_HOST:-}
 
       # Scale-to-zero. Apps stop after this long with no traffic and start
       # again on the next request; 0 keeps them all resident.

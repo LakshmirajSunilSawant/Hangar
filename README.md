@@ -63,8 +63,15 @@ own terms:
 ```
 
 That measures through the proxy against a live stack, so it also includes
-forward-auth and the retry loop — a slightly larger and more honest number
-than the table above.
+forward-auth and the retry loop. Run against the full demo stack — gVisor,
+egress denied, app auth on, apps on an internal network with no published
+ports — `examples/whoami` woke in **2.81s median** over 5 rounds (2.65s
+fastest, 3.15s slowest). That is the number a person actually waits: their
+browser's request, the platform checking who they are, the container starting,
+FastAPI importing, and the response coming back.
+
+Worth noting the slowest round crossed 3s. The target is met at the median on
+this hardware, not with room to spare.
 
 ### A note on the sandbox
 
@@ -178,6 +185,7 @@ redacted).
 | `HANGAR_APP_AUTH` | `0` | `1` requires sign-in before reaching any app |
 | `HANGAR_COOKIE_DOMAIN` | unset | Scopes the session across subdomains; required with app auth |
 | `HANGAR_CONTROL_PLANE_ADDRESS` | `127.0.0.1:8080` | Where the proxy reaches Hangar for forward-auth |
+| `HANGAR_CONTROL_PLANE_HOST` | unset | Hostname for the dashboard. Set it and Hangar keeps its own route published |
 | `HANGAR_IDLE_TIMEOUT` | `0` | Seconds without traffic before an app sleeps. `0` keeps apps resident |
 | `HANGAR_IDLE_CHECK_INTERVAL` | `30` | How often the reaper looks for idle apps |
 | `HANGAR_WAKE_TIMEOUT` | `30` | How long the proxy retries an app that is still starting |
@@ -256,6 +264,17 @@ restarts even when the container's port changes — that's the point of it.
 
 Routes are inserted at the front of Caddy's route list. Caddy matches routes in
 order, so a route appended behind a catch-all is never reached.
+
+**The routing table is treated as a cache, not as state.** Caddy's official
+image starts with `caddy run --config /etc/caddy/Caddyfile`, so every Caddy
+restart discards each route Hangar pushed and serves the image's welcome page
+instead — with a 200, on every app URL, without a single error anywhere. Hangar
+therefore rebuilds the whole table from the database whenever the control plane
+starts (`reconcile.py`). Set `HANGAR_CONTROL_PLANE_HOST` and the dashboard's own
+route is rebuilt with them; otherwise it is the one URL a restart leaves broken.
+
+This was found on a live stack, where every app had been quietly serving
+"Caddy works!" for an hour after a reboot.
 
 ### Scale-to-zero
 

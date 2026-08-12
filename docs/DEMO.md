@@ -171,19 +171,17 @@ containers, that variable is why.
 After a reboot, WSL starts at logon (a shortcut in the Startup folder) and the
 containers come back on their own. Give it about a minute.
 
-The dashboard's own Caddy route is the one piece Hangar doesn't manage; if
-`hangar.localtest.me` stops resolving to the dashboard but apps still work,
-re-add it:
+**If every URL shows a "Caddy works!" page**, Caddy restarted and dropped its
+routing table — its image reloads a packaged Caddyfile on every start, which
+throws away everything Hangar pushed through the admin API. Hangar rebuilds the
+table when the control plane starts, so the fix is to restart it:
 
 ```powershell
-wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /opt/hangar-demo && docker compose exec -T hangar python -c \"
-import requests
-requests.put('http://caddy:2019/config/apps/http/servers/srv0/routes/0', json={
-  '\@id': 'hangar-control-plane',
-  'match': [{'host': ['hangar.localtest.me']}],
-  'handle': [{'handler': 'reverse_proxy', 'upstreams': [{'dial': 'hangar:8080'}]}],
-  'terminal': True})\""
+wsl -d Ubuntu-24.04 -u root -- bash -c "cd /opt/hangar-demo && docker compose restart hangar"
 ```
+
+That republishes every app's route *and* the dashboard's own. Worth knowing
+before you record: this is what a stale-looking demo actually is.
 
 ## Tearing it down
 
