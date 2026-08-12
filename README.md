@@ -380,10 +380,31 @@ hangar/
   cli.py         `hangar serve` / `deploy` / `config` / `gen-key`
   client.py      HTTP client for deploying to a remote Hangar
 dashboard/       React + Vite owner UI, served by the control plane
-scripts/         backup.sh and restore.sh (restic)
+scripts/         backup.sh, restore.sh, deploy-zip.sh, measure-wake.sh
 tests/           test suite; `slow` marker = needs Docker
-examples/        sample apps used to exercise the pipeline
+examples/        sample apps
 ```
+
+### The examples
+
+Four of them are instruments and one is a tool, which is worth knowing before
+judging the platform by them:
+
+| | |
+|---|---|
+| `fastapi-hello`, `express-hello` | prove detection and the build pipeline |
+| `whoami` | proves identity headers arrive — 25 lines, no auth code |
+| `sqlite-notes` | proves per-app storage survives a restart |
+| **`standup`** | **what a real internal tool looks like on Hangar** |
+
+`standup` is a team standup board with an actual interface. It has no login
+screen, no user table and no permission code, and it still greets you by name
+and shows viewers a read-only page while owners and editors get a compose box —
+because Hangar attaches the visitor's email and role to every request. Adding
+someone to the team is a sharing action in the dashboard, not a code change.
+
+It also renders its own CSS inline and fetches nothing from a CDN, so it works
+unchanged with egress denied.
 
 ## Security posture today
 

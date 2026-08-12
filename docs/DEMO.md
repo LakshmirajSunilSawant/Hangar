@@ -28,6 +28,9 @@ it never happened mid-take, raise `HANGAR_IDLE_TIMEOUT` in
 | Dashboard | <http://hangar.localtest.me> |
 | Admin | `you@demo.local` / `demo-password-2026` |
 | Teammate | `teammate@demo.local` / `demo-password-2026` |
+| Standup board | <http://standup.localtest.me> — the tool to demo |
+| Notes | <http://notes.localtest.me> — storage, and `/docs` for a UI |
+| Whoami | <http://whoami.localtest.me> — raw identity headers |
 
 `*.localtest.me` is a public DNS name that resolves to `127.0.0.1`, so these
 look like real URLs with no hosts-file editing.
@@ -97,30 +100,39 @@ through the platform."
 
 ### 4. Share it like a document (90 seconds — the important one)
 
-Open the app's **People** tab. Add `teammate@demo.local` as a **viewer**.
+Use **<http://standup.localtest.me>** for this. It's a team standup board — a
+tool that looks like something a team would actually open, rather than a page
+of JSON.
 
-Now, in a private window, go to <http://whoami.localtest.me>.
+Signed in as `you@demo.local`, you get a compose box and can post an update.
 
-- Signed out → **refused**. The app is never reached.
-- Sign in as the teammate → the app loads, and says:
+Now open it in a private window:
 
-```json
-{
-  "user": "teammate@demo.local",
-  "role": "viewer",
-  "authenticated_by": "the platform, not this app"
-}
+- Signed out → **refused**, 401. The app is never reached.
+- Sign in as `teammate@demo.local` → the same page loads, greets them by name,
+  shows the team's updates — and instead of the compose box there's
+  **"Read-only. You have viewer access to this tool."**
+
+Nobody changed any code between those two views.
+
+**Then show the source** — `examples/standup/main.py` has no login screen, no
+user table, and no permission system. It reads two headers the platform
+attaches:
+
+```python
+self.email = request.headers.get("x-hangar-user")
+self.role  = request.headers.get("x-hangar-role")
 ```
 
-**Then show them the source** — `examples/whoami/main.py` is about 25 lines and
-contains no login code, no session handling, no user table. It just reads a
-header.
-
-"The app has no idea how to authenticate anyone. It doesn't need to. Access is
-the platform's job, so every tool gets it for free."
+"Making someone read-only was a dropdown in the dashboard, not a deploy. The
+app doesn't know how to authenticate anyone and doesn't need to — that's the
+platform's job, so every tool gets it for free."
 
 Then try <http://notes.localtest.me> as the same teammate → **403**. It was
 never shared with them.
+
+If you want the sharper version of the same point, `whoami.localtest.me`
+returns the raw headers as JSON — useful if someone asks *how* the app knows.
 
 ### 5. It's not a toy (30 seconds)
 
