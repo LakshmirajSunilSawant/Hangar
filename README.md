@@ -30,7 +30,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Per-app databases (SQLite or Postgres) | working |
 | CI (GitHub Actions) | working |
 | One-command deploy (Docker Compose) | working |
-| Backups (restic) | working |
+| Backups (restic), restore round-trip exercised | working |
 | `hangar deploy` CLI | working |
 | Scale-to-zero (sleep on idle, wake on request) | working |
 | Per-app CPU/memory usage in the dashboard | working |

@@ -265,6 +265,20 @@ Daily via cron:
 
 **Test a restore before you need one.** An untested backup is a guess.
 
+`restore.sh` deliberately stops before overwriting anything: it pulls a
+snapshot into a temporary directory, shows you what came back, and prints the
+four commands that finish the job. Run it any time — it is safe on a live
+system, which makes "have I actually got a backup?" a question you can answer
+in thirty seconds.
+
+Verified on a running stack: the dump contains every table including `user`
+(pg_dump quotes it, since it's a reserved word), `.env` carries
+`HANGAR_SECRET_KEY`, and each app's volume comes back **owned by uid 10001**.
+That last one is the one to watch — apps run as that user, and a volume
+restored as root leaves an app unable to write to its own database while
+looking perfectly healthy from the outside. `tests/test_backup.py` round-trips
+a volume through the exact commands these scripts use and asserts it.
+
 ---
 
 ## Optional: private team access
