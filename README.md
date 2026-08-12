@@ -34,27 +34,35 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | `hangar deploy` CLI | working |
 | Scale-to-zero (sleep on idle, wake on request) | working |
 
-Measured on x86 (WSL2, warm base image layers):
+### Cold start
 
-| Sample app | Runtime | Build | Cold start → HTTP 200 |
+PRD §9 asks for **under 3 seconds to reopen an idle app**. Now that
+scale-to-zero exists, that is the case actually being measured: the container
+is genuinely stopped between rounds, and the clock runs from `docker start`
+until the app answers HTTP 200, so the app's own boot is included.
+
+Median of 5 rounds each, x86 under WSL2, warm image layers:
+
+| Sample app | Sandbox | Build | Wake from idle |
 |---|---|---|---|
-| `examples/fastapi-hello` | plain Docker | 20.0s | 1.70s |
-| `examples/express-hello` | plain Docker | 17.1s | 0.78s |
-| `examples/fastapi-hello` | **gVisor (`runsc`)** | 19.1s | **2.34s** |
+| `examples/fastapi-hello` | **gVisor (`runsc`)** | 9.4s | **2.33s** |
+| `examples/express-hello` | **gVisor (`runsc`)** | 15.6s | **1.12s** |
 
-The gVisor number is the interesting one: a real sandbox, kernel `4.19.0-gvisor`,
-still inside the PRD's <3s target. Sandboxing cost about 0.6s.
+Both inside the target, kernel `4.19.0-gvisor` in each case. Python plus a
+framework import costs about 1.2s more than Node — the sandbox is not the
+expensive part.
 
-**This is still not the Milestone 1 answer.** It is x86 rather than Ampere ARM,
-and WSL2 rather than bare metal. Evidence, not a verdict.
-
-Scale-to-zero now exists, so the case the PRD actually targets — an idle app
-being reopened — is measurable rather than hypothetical. Measure it on your own
-host, because the number depends entirely on the app and the sandbox:
+**This is not yet the Milestone 1 verdict.** It is x86 rather than Ampere ARM
+and WSL2 rather than bare metal, so the Oracle box has to be measured on its
+own terms:
 
 ```bash
 ./scripts/measure-wake.sh <app-name>
 ```
+
+That measures through the proxy against a live stack, so it also includes
+forward-auth and the retry loop — a slightly larger and more honest number
+than the table above.
 
 ### A note on the sandbox
 
