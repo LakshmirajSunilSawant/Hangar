@@ -73,6 +73,19 @@ def test_health_response_matches(client):
     assert interface_fields("Health") <= set(client.get("/healthz").json())
 
 
+def test_secret_response_matches(client, app_id, monkeypatch):
+    from hangar import secrets
+
+    monkeypatch.setenv("HANGAR_SECRET_KEY", secrets.generate_key())
+    body = client.put(f"/apps/{app_id}/secrets/API_KEY", json={"value": "x"}).json()
+    assert interface_fields("Secret") <= set(body)
+
+
+def test_the_secret_interface_declares_no_value_field():
+    """A `value` here would mean the frontend expects an API that discloses one."""
+    assert "value" not in interface_fields("Secret")
+
+
 def test_metrics_response_matches(client, app_id):
     assert interface_fields("Metrics") <= set(
         client.get(f"/apps/{app_id}/metrics").json()

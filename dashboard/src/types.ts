@@ -32,6 +32,14 @@ export interface Logs {
   runtime_log: string;
 }
 
+/** A secret's existence. There is deliberately no `value` — the API never
+ *  returns one, to anybody. */
+export interface Secret {
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Sample {
   /** Unix seconds. */
   at: number;

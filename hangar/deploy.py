@@ -12,9 +12,10 @@ import json
 import logging
 from pathlib import Path
 
-from . import backends, config, database, ingest, routing, scan, store
+from . import appsecrets, backends, config, database, ingest, routing, scan, store
 from .backends import BackendError
 from .database import DatabaseError
+from .secrets import SecretError
 from .detect import DetectionError, detect
 from .ingest import IngestError
 from .routing import RoutingError
@@ -83,12 +84,25 @@ def deploy(app_id: str) -> None:
             if provisioned.kind != "none":
                 record(f"attached {provisioned.kind} database ({provisioned.connection_ref})")
 
+            # The app's own secrets, decrypted for exactly as long as it takes
+            # to start the container. Provisioned values are applied last so a
+            # stored secret cannot quietly redirect an app away from the
+            # database Hangar gave it; appsecrets refuses those names anyway,
+            # and this makes the ordering true regardless.
+            injected = appsecrets.env_for(sess, app.id)
+            if injected:
+                # Names only. Deploy logs are shown in the dashboard.
+                record(
+                    f"injected {len(injected)} secret(s): "
+                    + ", ".join(sorted(injected))
+                )
+
             running = backend.run(
                 result.image_tag,
                 app_id=app.id,
                 app_name=app.name,
                 container_port=detection.port,
-                env=provisioned.env,
+                env={**injected, **provisioned.env},
                 volumes=provisioned.volumes,
             )
 
@@ -126,6 +140,10 @@ def deploy(app_id: str) -> None:
             ScanBlocked,
             IngestError,
             DatabaseError,
+            # A rotated HANGAR_SECRET_KEY makes stored secrets unreadable.
+            # Failing the deploy with that message beats starting the app
+            # without the credentials it needs and letting it crash-loop.
+            SecretError,
         ) as exc:
             _fail(sess, app, deployment, lines, str(exc))
         except Exception as exc:  # noqa: BLE001 - a crash here must not kill the thread

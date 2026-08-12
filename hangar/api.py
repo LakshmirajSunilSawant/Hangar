@@ -32,7 +32,8 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backends, config, database, identity, idle, ingest, metrics, routing
+from . import appsecrets, backends, config, database, identity, idle, ingest, metrics
+from . import routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import authorize, current_principal, require_admin, require_token
@@ -40,6 +41,7 @@ from .backends import BackendError
 from .database import DatabaseError
 from .ingest import IngestError
 from .routing import RoutingError
+from .secrets import SecretError
 from .identity import Principal
 from .permissions import Action
 from .routes_auth import (
@@ -153,6 +155,18 @@ class LogsView(BaseModel):
     app_id: str
     build_log: str
     runtime_log: str
+
+
+class SecretRequest(BaseModel):
+    value: str = Field(description="Stored sealed. Never returned by the API.")
+
+
+class SecretView(BaseModel):
+    """A secret's existence. Deliberately carries no value field at all."""
+
+    name: str
+    created_at: str
+    updated_at: str
 
 
 class MetricsView(BaseModel):
@@ -431,6 +445,71 @@ def get_logs(
         runtime_log = ""
 
     return LogsView(app_id=app.id, build_log=build_log, runtime_log=runtime_log)
+
+
+@apps.get("/{app_id}/secrets", response_model=list[SecretView])
+def list_secrets(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> list[SecretView]:
+    """Which secrets exist — never what they contain.
+
+    There is deliberately no endpoint that returns a value. An API that can
+    disclose a stored secret is one session cookie away from disclosing all of
+    them; if someone loses one, they set it again.
+    """
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
+        return [
+            SecretView(
+                name=record.name,
+                created_at=record.created_at.isoformat(),
+                updated_at=record.updated_at.isoformat(),
+            )
+            for record in appsecrets.list_for(sess, app_id)
+        ]
+
+
+@apps.put("/{app_id}/secrets/{name}", response_model=SecretView)
+def put_secret(
+    app_id: str,
+    name: str,
+    request: SecretRequest,
+    principal: Principal = Depends(current_principal),
+) -> SecretView:
+    """Store a secret, sealed, for injection at the next deploy."""
+    with store.session() as sess:
+        app = _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
+
+        has_database = (app.db_type or config.settings().app_db) != "none"
+        try:
+            record = appsecrets.put(
+                sess, app_id, name, request.value, app_has_database=has_database
+            )
+        except appsecrets.SecretNameError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except SecretError as exc:
+            # No HANGAR_SECRET_KEY. Storing the value in plaintext instead
+            # would be the one thing PRD §8 says never to do.
+            raise HTTPException(503, str(exc)) from exc
+
+        return SecretView(
+            name=record.name,
+            created_at=record.created_at.isoformat(),
+            updated_at=record.updated_at.isoformat(),
+        )
+
+
+@apps.delete("/{app_id}/secrets/{name}", status_code=204)
+def delete_secret(
+    app_id: str, name: str, principal: Principal = Depends(current_principal)
+) -> None:
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.DEPLOY)
+        if not appsecrets.delete(sess, app_id, name):
+            raise HTTPException(404, f"no secret named {name!r}")
 
 
 @apps.get("/{app_id}/metrics", response_model=MetricsView)
@@ -730,6 +809,9 @@ def delete_app(
         # source_path app's directory belongs to the user and is left alone.
         if app.source_type in ("zip", "repo"):
             ingest.discard_source(app_id)
+        # Secrets have no meaning without the app, and leaving them behind
+        # would keep credentials in the database indefinitely.
+        appsecrets.delete_all(sess, app_id)
         for deployment in store.deployments_for(sess, app_id):
             sess.delete(deployment)
         sess.delete(app)

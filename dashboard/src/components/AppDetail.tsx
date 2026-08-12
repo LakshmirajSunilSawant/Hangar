@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { IN_FLIGHT, type App, type Logs, type Scan } from "../types";
+import { Secrets } from "./Secrets";
 import { Sharing } from "./Sharing";
 import { ScanChip, SeverityChip, StatusChip } from "./StatusChip";
 import { Usage } from "./Usage";
 
-type Tab = "logs" | "usage" | "scan" | "people";
+type Tab = "logs" | "usage" | "scan" | "secrets" | "people";
 
 export function AppDetail({
   app,
@@ -164,6 +165,9 @@ export function AppDetail({
         <button role="tab" aria-selected={tab === "scan"} onClick={() => setTab("scan")}>
           Security{scan && scan.findings.length > 0 ? ` (${scan.findings.length})` : ""}
         </button>
+        <button role="tab" aria-selected={tab === "secrets"} onClick={() => setTab("secrets")}>
+          Secrets
+        </button>
         <button role="tab" aria-selected={tab === "people"} onClick={() => setTab("people")}>
           People
         </button>
@@ -172,6 +176,7 @@ export function AppDetail({
       {tab === "logs" && <LogsPane logs={logs} />}
       {tab === "usage" && <Usage appId={app.id} live={app.status === "running"} />}
       {tab === "scan" && <ScanPane scan={scan} />}
+      {tab === "secrets" && <Secrets appId={app.id} />}
       {tab === "people" && <Sharing appId={app.id} />}
     </div>
   );

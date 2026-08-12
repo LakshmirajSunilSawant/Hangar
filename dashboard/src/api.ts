@@ -20,6 +20,7 @@ import type {
   Metrics,
   Role,
   Scan,
+  Secret,
   User,
   WhoAmI,
 } from "./types";
@@ -107,6 +108,25 @@ export const api = {
   scan: (id: string) => request<Scan>(`/apps/${id}/scan`),
 
   metrics: (id: string) => request<Metrics>(`/apps/${id}/metrics`),
+
+  // -- secrets -------------------------------------------------------
+  //
+  // There is no `getSecret`. The API has no endpoint that returns a value,
+  // so neither does this client.
+
+  secrets: (id: string) => request<Secret[]>(`/apps/${id}/secrets`),
+
+  putSecret: (id: string, name: string, value: string) =>
+    request<Secret>(`/apps/${id}/secrets/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    }),
+
+  deleteSecret: (id: string, name: string) =>
+    request<void>(`/apps/${id}/secrets/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
 
   fromPath: (name: string, sourcePath: string) =>
     request<App>("/apps", {

@@ -159,6 +159,22 @@ class AppDatabase(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class AppSecret(SQLModel, table=True):
+    """One environment variable an app needs but must not ship in its source.
+
+    The value is sealed with libsodium (see secrets.py) and is never returned
+    by the API — not to an owner, not to an admin. Names are listable; values
+    only ever leave here on their way into a container's environment.
+    """
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    app_id: str = Field(index=True, foreign_key="app.id")
+    name: str = Field(index=True)
+    sealed_value: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class Deployment(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     app_id: str = Field(index=True, foreign_key="app.id")

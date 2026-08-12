@@ -34,6 +34,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | `hangar deploy` CLI | working |
 | Scale-to-zero (sleep on idle, wake on request) | working |
 | Per-app CPU/memory usage in the dashboard | working |
+| Per-app secrets, sealed and injected as env vars | working |
 
 ### Cold start
 
@@ -131,6 +132,9 @@ curl http://127.0.0.1:8080/apps/<id>/logs   # build log + container log
 | `GET` | `/apps/{id}/logs` | Build log and container log |
 | `GET` | `/apps/{id}/scan` | Security findings from the pre-execution scan |
 | `GET` | `/apps/{id}/metrics` | CPU and memory, recent history, against the app's caps |
+| `GET` | `/apps/{id}/secrets` | Which secrets exist. Never their values |
+| `PUT` | `/apps/{id}/secrets/{name}` | Store a secret, sealed, for the next deploy |
+| `DELETE` | `/apps/{id}/secrets/{name}` | Forget a secret |
 | `POST` | `/apps/{id}/redeploy` | Rebuild and replace the container |
 | `POST` | `/apps/{id}/stop` | Stop the container |
 | `POST` | `/apps/{id}/restart` | Restart and re-read the published port |
@@ -374,8 +378,9 @@ Per PRD §8, and honestly labelled:
 | Static scan before first execution | enforced (`HANGAR_SCAN_POLICY`) |
 | Egress default-deny | available (`HANGAR_EGRESS=deny`), off by default |
 | gVisor/Kata sandbox | wired (`HANGAR_RUNTIME=runsc`), needs a Linux host |
-| Platform-level auth in front of apps | **not yet** — shared token on the API only |
-| Secrets injected at runtime, never in code | **not yet** |
+| Platform-level auth in front of apps | enforced (`HANGAR_APP_AUTH=1`), off by default |
+| Secrets injected at runtime, never in code | enforced, sealed with libsodium |
+| Secrets readable back through the API | never, by design |
 
 Until gVisor is actually in use, the kernel is shared with the host — only
 deploy code you wrote or have read.
@@ -427,6 +432,33 @@ control-plane database, per PRD §8. `HANGAR_SECRET_KEY` is never auto-generated
 — a key that changed on restart would silently orphan every stored secret.
 
 Deleting an app destroys its database unless you pass `?keep_data=true`.
+
+### Per-app secrets
+
+A database was the only thing Hangar could hand an app. Everything else a
+generated tool eventually needs — a Slack token, an API key, an internal
+service's credentials — had no answer except committing it to the repo, where
+the security scan would rightly flag it.
+
+```bash
+curl -X PUT /apps/{id}/secrets/SLACK_TOKEN -d '{"value":"xoxb-..."}'
+```
+
+Values are sealed with libsodium and injected as environment variables at
+deploy time, so the control plane holds plaintext only for as long as it takes
+to start a container. Changes take effect on the next deploy, because that is
+when a container's environment is set.
+
+**Nothing reads a secret back.** `GET /apps/{id}/secrets` lists names and
+timestamps and has no value field at all — an endpoint whose job is disclosing
+secrets is one session cookie away from disclosing all of them. Lose one, set
+it again.
+
+Deploy logs record how many secrets were injected and what they are called,
+never what they contain; those logs are shown in the dashboard and readable by
+editors. Names Hangar sets itself (`PORT`, `HANGAR_APP_*`, and `DATABASE_URL`
+for an app that has a per-app database) are refused rather than silently
+ignored.
 
 ### Uploaded and fetched sources
 

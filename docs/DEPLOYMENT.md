@@ -296,7 +296,7 @@ After all this you have a working, always-on, $0 Hangar. Against PRD §8:
 | Egress default-deny | met (`HANGAR_EGRESS=deny`, the compose default) |
 | Platform auth in front of apps | met (`HANGAR_APP_AUTH=1`) |
 | Per-user permissions | met |
-| Secrets encrypted at rest | met for per-app database passwords |
+| Secrets encrypted at rest | met, for database passwords and per-app secrets |
 
 Still open: the Milestone 1 cold-start spike has not been run on this hardware,
 and nothing here has faced a real user.
