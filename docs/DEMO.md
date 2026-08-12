@@ -10,11 +10,18 @@ is live right now — no slides.
 curl.exe -s http://hangar.localtest.me/healthz
 ```
 
-Expect `"sandbox_runtime":"runsc"` and `"auth":"enabled"`. If it doesn't
-answer, see [If something is down](#if-something-is-down).
+Expect `"sandbox_runtime":"runsc"`, `"auth":"enabled"`, `"idle_reaper":true`
+and `"metrics":true`. If it doesn't answer, or if URLs show a "Caddy works!"
+page, see [If something is down](#if-something-is-down).
 
 Open a **fresh browser profile or a private window** — the sharing part is much
 better told from a signed-out state.
+
+Apps sleep after **5 minutes** with no traffic on this stack, so an app you
+haven't touched in a while takes about three seconds on the first click. That
+is the feature, not a stall — beat 6 is where you point at it. If you'd rather
+it never happened mid-take, raise `HANGAR_IDLE_TIMEOUT` in
+`/opt/hangar-demo/.env` and `docker compose up -d hangar`.
 
 | | |
 |---|---|
@@ -27,7 +34,7 @@ look like real URLs with no hosts-file editing.
 
 ---
 
-## The story, in five beats
+## The story, in six beats
 
 ### 1. The problem (20 seconds, no screen)
 
@@ -116,23 +123,31 @@ every 15 seconds. "It can't take the box down, and I can see it not doing so."
 Also worth 10 seconds: the **notes** app writes to a database. Restart it from
 the dashboard; the data is still there.
 
-### 6. It gets out of its own way (30 seconds — optional)
+Worth 15 seconds if anyone asks about configuration: the **Secrets** tab. Set
+one, and note that it never comes back — the API has no endpoint that returns a
+value. "You give a tool its API key without putting it in the repo, and without
+the platform being able to hand it to anyone either."
 
-Only if the stack has `HANGAR_IDLE_TIMEOUT` set.
+### 6. It gets out of its own way (45 seconds)
 
-App page → **Sleep**. The container stops; the status chip says `sleeping`.
-Prove it really stopped:
+App page → **Sleep**. The status chip says `sleeping`. Prove it really stopped:
 
 ```powershell
 wsl -d Ubuntu-24.04 -u root -- docker inspect hangar-<app-id> --format '{{.State.Status}}'
 # exited
 ```
 
-Now open the app's URL. It comes back — about two seconds for a Python app,
-one for Node — and the link never changed.
+Now open the app's URL. It comes back in about three seconds and the link never
+changed. Measured on this stack: **2.81s median**, through sign-in checking,
+the proxy, a gVisor container starting and FastAPI importing.
 
 "Ten tools a team barely uses don't need to hold memory all day. They come back
 when someone opens them. That's how a free VM hosts more than three apps."
+
+If someone asks whether that's a security hole — it isn't, and it's worth
+showing. Sleep it again, then open the URL in a **signed-out** window: 401, and
+the container stays `exited`. Waking happens after the access check, so a
+stranger walking hostnames can't start anything.
 
 ---
 
@@ -149,10 +164,19 @@ CPU and memory caps. Show the Security tab.
 **"Where does it run?"** — Right now, this laptop. It's designed for a free
 Oracle ARM VM; the code is identical, and that's a configuration change.
 
-**"What's not done?"** — Answer honestly, it lands better: no metrics or
-resource graphs yet, no scale-to-zero (so the sub-3-second cold start is for a
-restart, not a wake-from-idle), and it hasn't been through a real security
-review or had a single real user.
+**"How many of these can it host?"** — More than the memory suggests, because
+apps that aren't being used aren't running. That's beat 6.
+
+**"Doesn't it need a login for each app?"** — No, and that's the interesting
+part. Show `examples/whoami/main.py`: 25 lines, no auth code. The platform
+authenticates and passes identity in a header.
+
+**"What's not done?"** — Answer honestly, it lands better. It has never been
+through a security review by anyone other than the person who wrote it, and it
+has had zero real users. Logs are per-container and on demand rather than
+shipped anywhere, so there's no searching across apps. Everything you've seen
+runs on one laptop; the Oracle VM it's designed for hasn't been provisioned,
+and none of the timings have been re-measured on ARM.
 
 ---
 
