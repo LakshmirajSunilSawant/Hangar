@@ -45,11 +45,24 @@ still takes a day. That's the gap."
 ### 2. Deploy something (60 seconds)
 
 Dashboard → **Deploy an app** → *Upload a zip* → pick any small Python or Node
-app. Or, from a terminal:
+app. That is the better version to record, since it's what a real user does.
+
+From a terminal instead:
 
 ```powershell
-wsl -d Ubuntu-24.04 -u root -- bash -c "cd /opt/hangar-demo && ./.venv/bin/hangar deploy examples/fastapi-hello --url http://127.0.0.1:8080 --token $TOKEN"
+wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /opt/hangar-demo && ./scripts/deploy-zip.sh examples/fastapi-hello hello"
 ```
+
+```
+uploading hello.zip (801 bytes) as 'hello'
+app f3b83753ec61 — building
+  status  : running
+  detected: python/fastapi
+  url     : http://hello.localtest.me
+```
+
+Delete it afterwards from the dashboard, or the next take starts with a stray
+app in the list.
 
 Watch it go `queued → building → running` and hand back a URL. Nobody wrote a
 Dockerfile. Nothing was configured.
@@ -187,10 +200,20 @@ wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /opt/hangar-demo && docker compose p
 wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /opt/hangar-demo && docker compose up -d"
 ```
 
-`DOCKER_HOST` is already set for root's shells to the demo's own Docker socket
-(`/var/run/docker-hangar.sock`) — separate from Docker Desktop's, so the two
-don't fight over `/var/run/docker.sock`. If a `docker` command shows the wrong
-containers, that variable is why.
+The demo has its own Docker socket, `/var/run/docker-hangar.sock`, kept
+separate from Docker Desktop's so the two can't fight over
+`/var/run/docker.sock`. `DOCKER_HOST` points at it from
+`/etc/profile.d/hangar-docker.sh`, which every login shell reads — hence
+`bash -lc` above, not `bash -c`.
+
+**If a `docker` command hangs for about a minute and then fails**, that
+variable didn't reach it, so the client is trying to talk to Docker Desktop
+instead. `bash -c` (no `-l`) is the usual reason; so is any shell that skips
+`/etc/profile`. Pass it explicitly and it will work anywhere:
+
+```powershell
+wsl -d Ubuntu-24.04 -u root -- bash -c "DOCKER_HOST=unix:///var/run/docker-hangar.sock docker ps"
+```
 
 After a reboot, WSL starts at logon (a shortcut in the Startup folder) and the
 containers come back on their own. Give it about a minute.
@@ -201,7 +224,7 @@ throws away everything Hangar pushed through the admin API. Hangar rebuilds the
 table when the control plane starts, so the fix is to restart it:
 
 ```powershell
-wsl -d Ubuntu-24.04 -u root -- bash -c "cd /opt/hangar-demo && docker compose restart hangar"
+wsl -d Ubuntu-24.04 -u root -- bash -lc "cd /opt/hangar-demo && docker compose restart hangar"
 ```
 
 That republishes every app's route *and* the dashboard's own. Worth knowing

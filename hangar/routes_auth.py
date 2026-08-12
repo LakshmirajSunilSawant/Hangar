@@ -225,6 +225,11 @@ def delete_user(user_id: str) -> None:
         ).all():
             sess.delete(session_row)
 
+        # Emit those DELETEs before the user's. SQLAlchemy is not told about
+        # the relationships, so it will not order them itself, and a database
+        # that enforces foreign keys rejects the whole transaction.
+        sess.flush()
+
         sess.delete(user)
         sess.commit()
 

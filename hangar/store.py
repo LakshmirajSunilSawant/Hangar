@@ -216,8 +216,30 @@ def engine(db_path: Path | str | None = None):
     if _engine is None or db_path is not None:
         url = f"sqlite:///{Path(db_path)}" if db_path else config.database_url()
         _engine = create_engine(url, **_engine_options(url))
+        if url.startswith("sqlite"):
+            _enforce_sqlite_foreign_keys(_engine)
         SQLModel.metadata.create_all(_engine)
     return _engine
+
+
+def _enforce_sqlite_foreign_keys(engine) -> None:
+    """Make SQLite check foreign keys, which it does not do by default.
+
+    Without this, SQLite silently accepts deletes that Postgres refuses, so a
+    deployment on Postgres hits integrity errors that no test on SQLite could
+    ever have caught. That is not hypothetical: deleting a shared app failed in
+    production while the whole suite was green, because the Permission rows
+    pointing at it were never removed and SQLite did not care.
+
+    Per-connection, because the pragma is not persisted in the database file.
+    """
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _set_pragma(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def _engine_options(url: str) -> dict:
@@ -304,6 +326,12 @@ def apps_visible_to(sess, user_id: str) -> list[App]:
         sess.exec(
             select(App).where(App.id.in_(app_ids)).order_by(App.created_at.desc())
         ).all()
+    )
+
+
+def databases_for(sess, app_id: str) -> list[AppDatabase]:
+    return list(
+        sess.exec(select(AppDatabase).where(AppDatabase.app_id == app_id)).all()
     )
 
 

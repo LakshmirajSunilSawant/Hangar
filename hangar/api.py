@@ -817,11 +817,33 @@ def delete_app(
         # source_path app's directory belongs to the user and is left alone.
         if app.source_type in ("zip", "repo"):
             ingest.discard_source(app_id)
-        # Secrets have no meaning without the app, and leaving them behind
-        # would keep credentials in the database indefinitely.
+        # Everything that points at this app, before the app itself.
+        #
+        # These are real foreign keys and Postgres enforces them. SQLAlchemy is
+        # not told about the relationships, so it will not order the DELETEs on
+        # its own — without the flush below it emits the app's DELETE first and
+        # the database refuses the lot. Secrets go for a second reason too:
+        # leaving them would keep live credentials in the database forever.
         appsecrets.delete_all(sess, app_id)
-        for deployment in store.deployments_for(sess, app_id):
-            sess.delete(deployment)
+        if keep_data:
+            for record in store.databases_for(sess, app_id):
+                if record.db_type == "postgres":
+                    # The database survives, but the sealed password does not,
+                    # since it lives on a row that has to go with the app.
+                    log.warning(
+                        "keeping the postgres database for %s, but its stored "
+                        "password is being deleted with the app — reset it as "
+                        "a superuser to reach the data again",
+                        app_id,
+                    )
+        for record in (
+            *store.permissions_for_app(sess, app_id),
+            *store.deployments_for(sess, app_id),
+            *store.databases_for(sess, app_id),
+        ):
+            sess.delete(record)
+        sess.flush()
+
         sess.delete(app)
         sess.commit()
         idle.TRACKER.forget(app_id)
