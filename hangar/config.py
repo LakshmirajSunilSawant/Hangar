@@ -58,10 +58,21 @@ class Settings:
     idle_timeout: int
     idle_check_interval: int
     wake_timeout: int
+    metrics_interval: int
+    metrics_history: int
 
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_token)
+
+    @property
+    def metrics_enabled(self) -> bool:
+        return self.metrics_interval > 0
+
+    @property
+    def metrics_window_minutes(self) -> float:
+        """How far back the kept history reaches, for the UI to say so."""
+        return round(self.metrics_interval * self.metrics_history / 60, 1)
 
     @property
     def idle_enabled(self) -> bool:
@@ -226,6 +237,12 @@ def settings() -> Settings:
         # How long the proxy keeps retrying an upstream that isn't listening
         # yet. This is the window a waking app has to bind its port.
         wake_timeout=_int("HANGAR_WAKE_TIMEOUT", 30),
+        # Resource sampling. 0 turns collection off entirely; each pass costs
+        # about a second per running app inside Docker, so this is not free.
+        metrics_interval=_int("HANGAR_METRICS_INTERVAL", 15),
+        # Samples kept per app. 120 at 15s is half an hour of history, and a
+        # few kilobytes — it is held in memory, not on disk.
+        metrics_history=_int("HANGAR_METRICS_HISTORY", 120),
     )
 
 

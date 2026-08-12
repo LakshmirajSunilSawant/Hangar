@@ -17,6 +17,7 @@ import type {
   Health,
   Invite,
   Logs,
+  Metrics,
   Role,
   Scan,
   User,
@@ -104,6 +105,8 @@ export const api = {
   logs: (id: string) => request<Logs>(`/apps/${id}/logs`),
 
   scan: (id: string) => request<Scan>(`/apps/${id}/scan`),
+
+  metrics: (id: string) => request<Metrics>(`/apps/${id}/metrics`),
 
   fromPath: (name: string, sourcePath: string) =>
     request<App>("/apps", {

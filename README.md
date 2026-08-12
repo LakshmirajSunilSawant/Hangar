@@ -33,6 +33,7 @@ The **thin vertical slice works**: source directory → runtime detection → im
 | Backups (restic) | working |
 | `hangar deploy` CLI | working |
 | Scale-to-zero (sleep on idle, wake on request) | working |
+| Per-app CPU/memory usage in the dashboard | working |
 
 ### Cold start
 
@@ -129,6 +130,7 @@ curl http://127.0.0.1:8080/apps/<id>/logs   # build log + container log
 | `GET` | `/apps/{id}` | One app: status, URL, detected runtime |
 | `GET` | `/apps/{id}/logs` | Build log and container log |
 | `GET` | `/apps/{id}/scan` | Security findings from the pre-execution scan |
+| `GET` | `/apps/{id}/metrics` | CPU and memory, recent history, against the app's caps |
 | `POST` | `/apps/{id}/redeploy` | Rebuild and replace the container |
 | `POST` | `/apps/{id}/stop` | Stop the container |
 | `POST` | `/apps/{id}/restart` | Restart and re-read the published port |
@@ -175,6 +177,8 @@ redacted).
 | `HANGAR_IDLE_TIMEOUT` | `0` | Seconds without traffic before an app sleeps. `0` keeps apps resident |
 | `HANGAR_IDLE_CHECK_INTERVAL` | `30` | How often the reaper looks for idle apps |
 | `HANGAR_WAKE_TIMEOUT` | `30` | How long the proxy retries an app that is still starting |
+| `HANGAR_METRICS_INTERVAL` | `15` | Seconds between resource samples. `0` turns collection off |
+| `HANGAR_METRICS_HISTORY` | `120` | Samples kept per app, in memory |
 | `PORT` | `8080` | Port to serve on (what most hosts inject) |
 
 For Postgres, install the driver: `uv pip install -e ".[postgres]"`.
@@ -277,6 +281,27 @@ Three decisions worth knowing:
 Sleeping is not stopping: `/stop` withdraws the route and the app stays down
 until someone starts it, while a slept app's URL keeps working. The reaper only
 ever touches `running` apps, so a deliberate stop is never undone.
+
+### Resource usage
+
+PRD Milestone 5 names Prometheus, Grafana and Loki. All three are the right
+answer at a scale this doesn't have, and the wrong one on a 12 GB VM already
+running Postgres, Caddy, the control plane and every app — the monitoring
+stack would be the largest tenant on the machine.
+
+What an owner actually wants from that milestone is narrow: is my app near its
+memory cap, is it spinning the CPU. Docker already knows both, so Hangar
+samples `docker stats` on an interval and keeps a short history in memory, and
+the dashboard draws it. No extra services, no time-series database, a few
+kilobytes per app.
+
+In memory is a real trade: history starts empty after a control-plane restart.
+The dashboard says so rather than drawing a flat line and implying the app was
+quiet. Persisting it would mean a write per app per interval on a free-tier
+disk, to store data nobody reads after the afternoon.
+
+Logs remain per-container and on demand (`/apps/{id}/logs`) rather than shipped
+anywhere, which is the same trade for the same reason.
 
 ### Swapping the sandbox
 

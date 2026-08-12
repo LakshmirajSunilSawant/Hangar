@@ -26,6 +26,8 @@ ISOLATED_ENV = (
     # apps mid-assertion.
     "HANGAR_IDLE_TIMEOUT",
     "HANGAR_IDLE_CHECK_INTERVAL",
+    "HANGAR_METRICS_INTERVAL",
+    "HANGAR_METRICS_HISTORY",
 )
 
 
@@ -36,13 +38,15 @@ def isolated_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def clean_idle_tracker():
-    """Last-seen times are process-global; leaking them across tests is a trap."""
-    from hangar import idle
+def clean_process_state():
+    """Last-seen times and samples are process-global; leaking them is a trap."""
+    from hangar import idle, metrics
 
     idle.TRACKER.clear()
+    metrics.HISTORY.clear()
     yield
     idle.TRACKER.clear()
+    metrics.HISTORY.clear()
 
 
 @pytest.fixture
@@ -57,7 +61,13 @@ def db(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(db):
+def client(db, monkeypatch):
+    # Entering TestClient runs the app's lifespan, which starts background
+    # threads for whatever is enabled. Metrics are on by default, and a
+    # collector polling Docker underneath every test is noise at best and a
+    # race against the per-test database at worst; tests that want one build
+    # it themselves.
+    monkeypatch.setenv("HANGAR_METRICS_INTERVAL", "0")
     with TestClient(api) as c:
         yield c
 

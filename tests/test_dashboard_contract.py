@@ -73,6 +73,27 @@ def test_health_response_matches(client):
     assert interface_fields("Health") <= set(client.get("/healthz").json())
 
 
+def test_metrics_response_matches(client, app_id):
+    assert interface_fields("Metrics") <= set(
+        client.get(f"/apps/{app_id}/metrics").json()
+    )
+
+
+def test_sample_shape_matches(client, app_id):
+    """Samples are plotted field by field, so a rename would draw a flat line."""
+    from hangar import metrics
+
+    metrics.HISTORY.record(
+        app_id,
+        metrics.Sample(
+            at=1.0, cpu_percent=1.0, memory_mb=1.0, memory_limit_mb=512.0
+        ),
+    )
+
+    samples = client.get(f"/apps/{app_id}/metrics").json()["samples"]
+    assert interface_fields("Sample") <= set(samples[0])
+
+
 def test_finding_shape_matches(client, app_id):
     """Findings are rendered field by field, so a rename would show blanks."""
     report = (

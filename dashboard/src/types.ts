@@ -32,6 +32,27 @@ export interface Logs {
   runtime_log: string;
 }
 
+export interface Sample {
+  /** Unix seconds. */
+  at: number;
+  /** Percent of one core, so 200 means two cores saturated. */
+  cpu_percent: number;
+  memory_mb: number;
+  memory_limit_mb: number;
+  memory_percent: number;
+}
+
+export interface Metrics {
+  app_id: string;
+  /** Seconds between samples. */
+  interval: number;
+  window_minutes: number;
+  memory_limit_mb: number;
+  cpu_limit: number;
+  current: Sample | null;
+  samples: Sample[];
+}
+
 export type Severity = "low" | "medium" | "high";
 
 export interface Finding {
@@ -66,6 +87,8 @@ export interface Health {
   /** Seconds of no traffic before an app sleeps; 0 means apps stay up. */
   idle_timeout: number;
   idle_reaper: boolean;
+  /** Whether the resource sampler is running. */
+  metrics: boolean;
 }
 
 /** Statuses that can still change on their own, so the UI keeps polling. */

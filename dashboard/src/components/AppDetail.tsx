@@ -3,8 +3,9 @@ import { api } from "../api";
 import { IN_FLIGHT, type App, type Logs, type Scan } from "../types";
 import { Sharing } from "./Sharing";
 import { ScanChip, SeverityChip, StatusChip } from "./StatusChip";
+import { Usage } from "./Usage";
 
-type Tab = "logs" | "scan" | "people";
+type Tab = "logs" | "usage" | "scan" | "people";
 
 export function AppDetail({
   app,
@@ -157,6 +158,9 @@ export function AppDetail({
         <button role="tab" aria-selected={tab === "logs"} onClick={() => setTab("logs")}>
           Logs
         </button>
+        <button role="tab" aria-selected={tab === "usage"} onClick={() => setTab("usage")}>
+          Usage
+        </button>
         <button role="tab" aria-selected={tab === "scan"} onClick={() => setTab("scan")}>
           Security{scan && scan.findings.length > 0 ? ` (${scan.findings.length})` : ""}
         </button>
@@ -166,6 +170,7 @@ export function AppDetail({
       </div>
 
       {tab === "logs" && <LogsPane logs={logs} />}
+      {tab === "usage" && <Usage appId={app.id} live={app.status === "running"} />}
       {tab === "scan" && <ScanPane scan={scan} />}
       {tab === "people" && <Sharing appId={app.id} />}
     </div>

